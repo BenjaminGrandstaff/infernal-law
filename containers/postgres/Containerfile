@@ -1,0 +1,4 @@
+FROM docker.io/pgvector/pgvector:0.8.6-pg17-bookworm
+
+COPY containers/postgres/init/001-enable-vector.sql \
+    /docker-entrypoint-initdb.d/001-enable-vector.sql
