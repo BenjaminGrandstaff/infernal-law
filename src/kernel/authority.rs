@@ -549,11 +549,51 @@ pub enum Verdict {
     Deny,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct DecisionId(Uuid);
+
+impl DecisionId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub const fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub const fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+}
+
+impl Default for DecisionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Display for DecisionId {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        Display::fmt(&self.0, formatter)
+    }
+}
+
+impl FromStr for DecisionId {
+    type Err = AuthorityError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(value)
+            .map(Self)
+            .map_err(|_| AuthorityError::InvalidDecisionId)
+    }
+}
+
 /// A pinned ILK-002 decision. Once recorded it is never re-evaluated: a
 /// later policy or grant change produces a new decision for a new request or
 /// route, never a silent change to this one (ILK-004).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorityDecision {
+    id: DecisionId,
     facts: PolicyFacts,
     verdict: Verdict,
     evaluator: ActorId,
@@ -562,8 +602,32 @@ pub struct AuthorityDecision {
 }
 
 impl AuthorityDecision {
+    /// Reconstructs a decision with its already-assigned, durably recorded
+    /// ID. Used by decision-record repository adapters.
+    pub const fn restore(
+        id: DecisionId,
+        facts: PolicyFacts,
+        verdict: Verdict,
+        evaluator: ActorId,
+        policy_bundle_version: Option<PolicyBundleVersion>,
+        decided_at: i64,
+    ) -> Self {
+        Self {
+            id,
+            facts,
+            verdict,
+            evaluator,
+            policy_bundle_version,
+            decided_at,
+        }
+    }
+
     pub const fn is_allowed(&self) -> bool {
         matches!(self.verdict, Verdict::Allow)
+    }
+
+    pub const fn id(&self) -> DecisionId {
+        self.id
     }
 
     pub const fn facts(&self) -> &PolicyFacts {
@@ -624,30 +688,44 @@ pub trait AuthorityRepository: Send + Sync {
     fn matching_grants(&self, facts: &PolicyFacts, now: i64) -> Result<Vec<Grant>, AuthorityError>;
 }
 
+/// Durably records a pinned decision. This is kernel bookkeeping, not
+/// administration: there is no out-of-band function here, because nothing
+/// but the kernel itself ever produces a decision to record.
+pub trait AuthorityDecisionRecorder: Send + Sync {
+    fn record(&self, decision: &AuthorityDecision) -> Result<(), AuthorityError>;
+}
+
 #[derive(Clone)]
-pub struct AuthorityService<R, E> {
+pub struct AuthorityService<R, E, D> {
     repository: R,
     evaluator: E,
     evaluator_id: ActorId,
+    decisions: D,
 }
 
-impl<R, E> AuthorityService<R, E>
+impl<R, E, D> AuthorityService<R, E, D>
 where
     R: AuthorityRepository,
     E: PolicyEvaluator,
+    D: AuthorityDecisionRecorder,
 {
-    pub const fn new(repository: R, evaluator: E, evaluator_id: ActorId) -> Self {
+    pub const fn new(repository: R, evaluator: E, evaluator_id: ActorId, decisions: D) -> Self {
         Self {
             repository,
             evaluator,
             evaluator_id,
+            decisions,
         }
     }
 
-    /// Assembles the currently matching grants and asks the evaluator for a
-    /// verdict, then pins the result. An unreachable, erroring, or
-    /// malformed evaluator response is recorded as denial with no policy
-    /// bundle version, never as an implicit allow (ADR-0013).
+    /// Assembles the currently matching grants, asks the evaluator for a
+    /// verdict, and durably records the pinned result before returning it.
+    /// An unreachable, erroring, or malformed evaluator response is recorded
+    /// as denial with no policy bundle version, never as an implicit allow
+    /// (ADR-0013). If the decision cannot be durably recorded, `authorize`
+    /// fails rather than returning an unrecorded decision — the same
+    /// fail-closed posture the kernel already takes toward every other
+    /// durability dependency.
     pub fn authorize(
         &self,
         facts: PolicyFacts,
@@ -658,13 +736,16 @@ where
             Ok(evaluation) => (evaluation.verdict, Some(evaluation.policy_bundle_version)),
             Err(_) => (Verdict::Deny, None),
         };
-        Ok(AuthorityDecision {
+        let decision = AuthorityDecision::restore(
+            DecisionId::new(),
             facts,
             verdict,
-            evaluator: self.evaluator_id,
+            self.evaluator_id,
             policy_bundle_version,
-            decided_at: now,
-        })
+            now,
+        );
+        self.decisions.record(&decision)?;
+        Ok(decision)
     }
 }
 
@@ -677,6 +758,7 @@ pub enum AuthorityError {
     InvalidSchemaName,
     InvalidSchemaVersionId,
     InvalidSchemaVersion,
+    InvalidDecisionId,
     SchemaNamespaceConflict(SchemaName),
     Repository(String),
     Evaluator(String),
@@ -699,6 +781,7 @@ impl Display for AuthorityError {
             Self::InvalidSchemaVersion => {
                 formatter.write_str("schema version number or publication time is invalid")
             }
+            Self::InvalidDecisionId => formatter.write_str("decision ID must be a UUID"),
             Self::SchemaNamespaceConflict(name) => {
                 write!(formatter, "schema name {name} is owned by a different service")
             }

@@ -1,16 +1,18 @@
 //! Goal: read kernel-owned ILK-002 authority grants and schema versions from
-//! PostgreSQL. Grant creation and schema status administration happen only
-//! through out-of-band database functions, never through this adapter — the
-//! same split already used for communication admission. Schema publication
-//! is the one write path this adapter does call, since any authenticated
-//! service may publish a schema version for a name it owns.
+//! PostgreSQL, and durably record pinned decisions. Grant creation and
+//! schema status administration happen only through out-of-band database
+//! functions, never through this adapter — the same split already used for
+//! communication admission. Schema publication and decision recording are
+//! the two write paths this adapter does call directly: publication because
+//! any authenticated service may publish a schema it owns, and decision
+//! recording because it is kernel bookkeeping, not administration.
 
 use r2d2_postgres::postgres::Row;
 
 use crate::kernel::authority::{
-    AuthorityError, AuthorityRepository, ContentDigest, Grant, GrantId, PolicyFacts, SchemaKind,
-    SchemaName, SchemaRecord, SchemaRepository, SchemaStatus, SchemaVersion, SchemaVersionId,
-    Scope,
+    AuthorityDecision, AuthorityDecisionRecorder, AuthorityError, AuthorityRepository,
+    ContentDigest, Grant, GrantId, PolicyFacts, SchemaKind, SchemaName, SchemaRecord,
+    SchemaRepository, SchemaStatus, SchemaVersion, SchemaVersionId, Scope, Verdict,
 };
 use crate::kernel::identity::ActorId;
 use crate::kernel::requests::ActionName;
@@ -34,6 +36,11 @@ const FIND_SCHEMA_VERSION_SQL: &str = "SELECT schema_version_id::text, kind, nam
         owner_service_id::text, content_digest, predecessor_id::text, published_at, status \
     FROM authority_schema_versions \
     WHERE kind = $1 AND name = $2 AND version = $3";
+
+const RECORD_DECISION_SQL: &str = "INSERT INTO authority_decisions \
+    (decision_id, source_service_id, action, scope, destination_service_id, \
+     verdict, evaluator_service_id, policy_bundle_version, decided_at) \
+    VALUES ($1::text::uuid, $2::text::uuid, $3, $4, $5::text::uuid, $6, $7::text::uuid, $8, $9)";
 
 #[derive(Clone)]
 pub struct PostgresAuthorityRepository {
@@ -111,6 +118,40 @@ impl SchemaRepository for PostgresAuthorityRepository {
     }
 }
 
+impl AuthorityDecisionRecorder for PostgresAuthorityRepository {
+    fn record(&self, decision: &AuthorityDecision) -> Result<(), AuthorityError> {
+        let mut connection = self.database.connection().map_err(repository_error)?;
+        let facts = decision.facts();
+        let destination = facts.destination().map(|id| id.to_string());
+        let policy_bundle_version = decision
+            .policy_bundle_version()
+            .map(|version| version.as_str());
+        let rows = connection
+            .execute(
+                RECORD_DECISION_SQL,
+                &[
+                    &decision.id().to_string(),
+                    &facts.source().to_string(),
+                    &facts.action().as_str(),
+                    &facts.scope().as_str(),
+                    &destination,
+                    &verdict_to_sql(decision.verdict()),
+                    &decision.evaluator().to_string(),
+                    &policy_bundle_version,
+                    &decision.decided_at(),
+                ],
+            )
+            .map_err(repository_error)?;
+        if rows != 1 {
+            return Err(AuthorityError::Repository(format!(
+                "recording decision {} changed {rows} rows",
+                decision.id()
+            )));
+        }
+        Ok(())
+    }
+}
+
 fn grant_from_row(row: &Row) -> Result<Grant, AuthorityError> {
     let id = row.get::<_, String>("grant_id").parse::<GrantId>()?;
     let source = row
@@ -172,6 +213,13 @@ fn schema_record_from_row(row: &Row) -> Result<SchemaRecord, AuthorityError> {
     )?;
     let status = schema_status_from_sql(&row.get::<_, String>("status"))?;
     Ok(SchemaRecord::restore(version, status))
+}
+
+fn verdict_to_sql(verdict: Verdict) -> &'static str {
+    match verdict {
+        Verdict::Allow => "allow",
+        Verdict::Deny => "deny",
+    }
 }
 
 fn schema_kind_to_sql(kind: SchemaKind) -> &'static str {

@@ -332,12 +332,19 @@ Implementation status:
   Published → Active/Retired → Suspended/Superseded/Retired with append-only
   status audit; superseded and retired are terminal and the Rust kernel never
   calls this function directly.
+- Complete: durable decision pinning. `AuthorityService::authorize` mints a
+  `DecisionId` and calls a new `AuthorityDecisionRecorder` dependency before
+  ever returning a decision; recording failure fails `authorize` itself
+  rather than returning an unrecorded decision, the same fail-closed posture
+  used everywhere else in the kernel. `PostgresAuthorityRepository`
+  implements the recorder with a plain append-only insert into
+  `authority_decisions` — kernel bookkeeping, not administration, so there is
+  no out-of-band function gating it, unlike grants and schema status.
 - Pending: integrating schema version references into `PolicyFacts`/`Grant`
   (deferred when the pure fact/grant contract was first built), an
   authenticated network `PolicyEvaluator` implementation and the outbound
-  signed-call machinery it needs, durable decision-pinning audit records, a
-  reference external policy evaluator service, and wiring this stage into
-  `ServiceRequestGate` (ADR-0013).
+  signed-call machinery it needs, a reference external policy evaluator
+  service, and wiring this stage into `ServiceRequestGate` (ADR-0013).
 - The existing signature, replay, and communication-admission gate is the
   required precondition and MUST remain ahead of this authority step.
 

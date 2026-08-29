@@ -3,10 +3,10 @@
 use std::sync::{Arc, Mutex};
 
 use infernal_law::kernel::authority::{
-    AuthorityError, AuthorityRepository, AuthorityService, ContentDigest, Grant,
-    PolicyBundleVersion, PolicyEvaluation, PolicyEvaluator, PolicyFacts, SchemaKind, SchemaName,
-    SchemaRecord, SchemaRepository, SchemaService, SchemaStatus, SchemaVersion, SchemaVersionId,
-    Scope, Verdict,
+    AuthorityDecision, AuthorityDecisionRecorder, AuthorityError, AuthorityRepository,
+    AuthorityService, ContentDigest, Grant, PolicyBundleVersion, PolicyEvaluation, PolicyEvaluator,
+    PolicyFacts, SchemaKind, SchemaName, SchemaRecord, SchemaRepository, SchemaService,
+    SchemaStatus, SchemaVersion, SchemaVersionId, Scope, Verdict,
 };
 use infernal_law::kernel::identity::ActorId;
 use infernal_law::kernel::requests::ActionName;
@@ -92,6 +92,16 @@ impl SchemaRepository for MemorySchemas {
     }
 }
 
+#[derive(Clone, Default)]
+struct MemoryDecisions(Arc<Mutex<Vec<AuthorityDecision>>>);
+
+impl AuthorityDecisionRecorder for MemoryDecisions {
+    fn record(&self, decision: &AuthorityDecision) -> Result<(), AuthorityError> {
+        self.0.lock().unwrap().push(decision.clone());
+        Ok(())
+    }
+}
+
 /// Allows only when at least one grant was handed to it: the simplest
 /// possible "a grant exists" policy algorithm.
 struct AllowIfAnyGrant;
@@ -145,7 +155,12 @@ fn digest(byte: u8) -> ContentDigest {
 
 #[test]
 fn default_deny_when_no_grant_matches() {
-    let service = AuthorityService::new(MemoryGrants::default(), AllowIfAnyGrant, ActorId::new());
+    let service = AuthorityService::new(
+        MemoryGrants::default(),
+        AllowIfAnyGrant,
+        ActorId::new(),
+        MemoryDecisions::default(),
+    );
     let facts = PolicyFacts::for_request_acceptance(
         ActorId::new(),
         action("billing.invoice.submit"),
@@ -174,7 +189,12 @@ fn matching_grant_allows_and_pins_the_evaluated_policy_bundle_version() {
         )
         .unwrap(),
     );
-    let service = AuthorityService::new(repository, AllowIfAnyGrant, evaluator_id);
+    let service = AuthorityService::new(
+        repository,
+        AllowIfAnyGrant,
+        evaluator_id,
+        MemoryDecisions::default(),
+    );
     let facts = PolicyFacts::for_request_acceptance(
         source,
         action("billing.invoice.submit"),
@@ -208,7 +228,12 @@ fn unreachable_evaluator_is_denied_never_implicitly_allowed() {
         )
         .unwrap(),
     );
-    let service = AuthorityService::new(repository, UnreachableEvaluator, ActorId::new());
+    let service = AuthorityService::new(
+        repository,
+        UnreachableEvaluator,
+        ActorId::new(),
+        MemoryDecisions::default(),
+    );
     let facts = PolicyFacts::for_request_acceptance(
         source,
         action("billing.invoice.submit"),
@@ -236,7 +261,12 @@ fn expired_grant_does_not_permit() {
         )
         .unwrap(),
     );
-    let service = AuthorityService::new(repository, AllowIfAnyGrant, ActorId::new());
+    let service = AuthorityService::new(
+        repository,
+        AllowIfAnyGrant,
+        ActorId::new(),
+        MemoryDecisions::default(),
+    );
     let facts = PolicyFacts::for_request_acceptance(
         source,
         action("billing.invoice.submit"),
@@ -264,7 +294,12 @@ fn request_acceptance_and_route_decisions_do_not_share_grants() {
         )
         .unwrap(),
     );
-    let service = AuthorityService::new(repository, AllowIfAnyGrant, ActorId::new());
+    let service = AuthorityService::new(
+        repository,
+        AllowIfAnyGrant,
+        ActorId::new(),
+        MemoryDecisions::default(),
+    );
 
     let acceptance_facts =
         PolicyFacts::for_request_acceptance(source, action("work.item.submit"), scope("*"));
@@ -295,7 +330,12 @@ fn wildcard_scope_grant_matches_any_requested_scope() {
         )
         .unwrap(),
     );
-    let service = AuthorityService::new(repository, AllowIfAnyGrant, ActorId::new());
+    let service = AuthorityService::new(
+        repository,
+        AllowIfAnyGrant,
+        ActorId::new(),
+        MemoryDecisions::default(),
+    );
     let facts = PolicyFacts::for_request_acceptance(
         source,
         action("billing.invoice.submit"),
@@ -497,4 +537,54 @@ fn invalid_schema_version_facts_are_rejected() {
         ),
         Err(AuthorityError::InvalidSchemaVersion)
     );
+}
+
+#[test]
+fn every_authorize_call_durably_records_exactly_one_decision() {
+    let decisions = MemoryDecisions::default();
+    let service = AuthorityService::new(
+        MemoryGrants::default(),
+        AllowIfAnyGrant,
+        ActorId::new(),
+        decisions.clone(),
+    );
+    let facts = PolicyFacts::for_request_acceptance(
+        ActorId::new(),
+        action("billing.invoice.submit"),
+        scope("*"),
+    );
+
+    let returned = service.authorize(facts, 1_000).unwrap();
+
+    let recorded = decisions.0.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].id(), returned.id());
+    assert_eq!(recorded[0], returned);
+}
+
+struct FailingDecisionRecorder;
+
+impl AuthorityDecisionRecorder for FailingDecisionRecorder {
+    fn record(&self, _decision: &AuthorityDecision) -> Result<(), AuthorityError> {
+        Err(AuthorityError::Repository(
+            "decision store unavailable".to_owned(),
+        ))
+    }
+}
+
+#[test]
+fn authorize_fails_rather_than_return_an_unrecorded_decision() {
+    let service = AuthorityService::new(
+        MemoryGrants::default(),
+        AllowIfAnyGrant,
+        ActorId::new(),
+        FailingDecisionRecorder,
+    );
+    let facts = PolicyFacts::for_request_acceptance(
+        ActorId::new(),
+        action("billing.invoice.submit"),
+        scope("*"),
+    );
+
+    assert!(service.authorize(facts, 1_000).is_err());
 }

@@ -70,6 +70,13 @@ schema it owns, plus an idempotent, terminal-state-respecting
 `set_authority_schema_status` administration function and append-only status
 audit for activation/suspension/supersession/retirement, which stay
 administrator-only exactly like grant creation.
+Migration 0011 creates append-only ILK-002 authority decisions: every
+`AuthorityService::authorize` call durably records its facts, verdict,
+evaluator identity, and policy bundle/version (absent only when the
+evaluator could not be reached) before the decision is ever returned to a
+caller. This is ordinary kernel bookkeeping written directly by the kernel
+role, not administration, so unlike grants and schema status there is no
+out-of-band function gating it.
 Applied migration versions are recorded in `kernel_schema_migrations`.
 
 The `PostgresIdentityRepository` adapter implements the identity module's

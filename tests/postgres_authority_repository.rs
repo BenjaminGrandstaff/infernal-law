@@ -4,20 +4,43 @@
 //! exactly the grants matching a given fact bundle's decision point. Also
 //! proves schema versions are published atomically and versioned by
 //! `PostgresAuthorityRepository` itself, while status administration stays
-//! out-of-band and idempotent, exactly like grant creation.
+//! out-of-band and idempotent, exactly like grant creation. Also proves
+//! `AuthorityService::authorize` durably records every decision through
+//! `PostgresAuthorityRepository` and that decision history is append-only.
 
 use std::env;
 
 use infernal_law::infrastructure::postgres_authority_repository::PostgresAuthorityRepository;
 use infernal_law::kernel::authority::{
-    AuthorityRepository, ContentDigest, PolicyFacts, SchemaKind, SchemaName, SchemaRepository,
-    SchemaStatus, Scope,
+    AuthorityError, AuthorityRepository, AuthorityService, ContentDigest, Grant,
+    PolicyBundleVersion, PolicyEvaluation, PolicyEvaluator, PolicyFacts, SchemaKind, SchemaName,
+    SchemaRepository, SchemaStatus, Scope, Verdict,
 };
 use infernal_law::kernel::identity::ActorKind;
 use infernal_law::kernel::requests::ActionName;
 use infernal_law::wiring::Application;
 use r2d2_postgres::postgres::{Client, NoTls, Row};
 use uuid::Uuid;
+
+struct AllowIfAnyGrant;
+
+impl PolicyEvaluator for AllowIfAnyGrant {
+    fn evaluate(
+        &self,
+        _facts: &PolicyFacts,
+        grants: &[Grant],
+    ) -> Result<PolicyEvaluation, AuthorityError> {
+        let verdict = if grants.is_empty() {
+            Verdict::Deny
+        } else {
+            Verdict::Allow
+        };
+        Ok(PolicyEvaluation::new(
+            verdict,
+            PolicyBundleVersion::new("v1").unwrap(),
+        ))
+    }
+}
 
 #[test]
 #[ignore = "requires DATABASE_URL, INFERNAL_LAW_SERVICE_ID, and PostgreSQL with pgvector"]
@@ -364,6 +387,88 @@ fn schema_versions_are_published_by_the_repository_and_administered_out_of_band(
             )
             .is_err(),
         "authority schema versions must never be deleted"
+    );
+}
+
+#[test]
+#[ignore = "requires DATABASE_URL, INFERNAL_LAW_SERVICE_ID, and PostgreSQL with pgvector"]
+fn authorize_durably_records_every_decision_and_history_is_append_only() {
+    let application = Application::from_env().expect("application should connect and migrate");
+    let source = application
+        .identities()
+        .create(ActorKind::Service, "Authority decision integration source")
+        .unwrap();
+    let evaluator_id = application
+        .identities()
+        .create(
+            ActorKind::Service,
+            "Authority decision integration evaluator",
+        )
+        .unwrap();
+    let repository = PostgresAuthorityRepository::new(application.database().clone());
+    let service = AuthorityService::new(
+        repository.clone(),
+        AllowIfAnyGrant,
+        evaluator_id.id(),
+        repository,
+    );
+
+    let facts = PolicyFacts::for_request_acceptance(
+        source.id(),
+        action("billing.invoice.submit"),
+        scope("*"),
+    );
+    let decision = service.authorize(facts, 1_000).unwrap();
+    assert!(
+        !decision.is_allowed(),
+        "no grant exists yet, so this must deny"
+    );
+
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be present");
+    let mut client = Client::connect(&database_url, NoTls).expect("test database should connect");
+    let row = client
+        .query_one(
+            "SELECT source_service_id::text, action, verdict, evaluator_service_id::text, \
+             policy_bundle_version, decided_at \
+             FROM authority_decisions WHERE decision_id = $1::text::uuid",
+            &[&decision.id().to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        row.get::<_, String>("source_service_id"),
+        source.id().to_string()
+    );
+    assert_eq!(row.get::<_, String>("action"), "billing.invoice.submit");
+    assert_eq!(row.get::<_, String>("verdict"), "deny");
+    assert_eq!(
+        row.get::<_, String>("evaluator_service_id"),
+        evaluator_id.id().to_string()
+    );
+    assert_eq!(
+        row.get::<_, Option<String>>("policy_bundle_version"),
+        Some("v1".to_owned()),
+        "the evaluator was reached and answered, so a bundle version must be recorded even for a deny"
+    );
+    assert_eq!(row.get::<_, i64>("decided_at"), 1_000);
+
+    assert!(
+        client
+            .execute(
+                "UPDATE authority_decisions SET verdict = 'allow' \
+                 WHERE decision_id = $1::text::uuid",
+                &[&decision.id().to_string()],
+            )
+            .is_err(),
+        "authority decisions must be immutable"
+    );
+    assert!(
+        client
+            .execute(
+                "DELETE FROM authority_decisions WHERE decision_id = $1::text::uuid",
+                &[&decision.id().to_string()],
+            )
+            .is_err(),
+        "authority decisions must be append-only"
     );
 }
 
