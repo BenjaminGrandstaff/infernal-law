@@ -1,5 +1,6 @@
 //! Goal: implement the minimum ILK-003 request contract as an immutable,
-//! addressable routing intent between stable service identities.
+//! durable store-and-forward intent that the kernel expands into subscriber
+//! destination routes.
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -95,38 +96,28 @@ impl FromStr for ActionName {
 ///
 /// The source must come from the authenticated transport context. Construction
 /// records that identity but does not itself authenticate or authorize it.
+/// Concrete destinations belong to kernel-created request routes, so the source
+/// neither selects nor discovers destination services.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Request {
     id: RequestId,
     source_service: ActorId,
-    destination_service: ActorId,
     action: ActionName,
 }
 
 impl Request {
-    pub fn create(
-        source_service: ActorId,
-        destination_service: ActorId,
-        action: &str,
-    ) -> Result<Self, RequestError> {
-        Self::restore(
-            RequestId::new(),
-            source_service,
-            destination_service,
-            action,
-        )
+    pub fn create(source_service: ActorId, action: &str) -> Result<Self, RequestError> {
+        Self::restore(RequestId::new(), source_service, action)
     }
 
     pub fn restore(
         id: RequestId,
         source_service: ActorId,
-        destination_service: ActorId,
         action: &str,
     ) -> Result<Self, RequestError> {
         Ok(Self {
             id,
             source_service,
-            destination_service,
             action: ActionName::new(action)?,
         })
     }
@@ -137,10 +128,6 @@ impl Request {
 
     pub const fn source_service(&self) -> ActorId {
         self.source_service
-    }
-
-    pub const fn destination_service(&self) -> ActorId {
-        self.destination_service
     }
 
     pub const fn action(&self) -> &ActionName {

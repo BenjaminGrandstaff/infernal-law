@@ -28,8 +28,10 @@ No dimension implicitly changes another. In particular:
 
 ## Direct REST authentication
 
-Services communicate directly with the kernel/hub over HTTPS. Requests follow
-the HTTP Message Signatures model and include:
+Services communicate directly with the kernel/hub over HTTPS, never directly
+with another service. The source is not given another service's identity,
+instance, endpoint, key, health, capacity, or subscription state. Requests
+follow the HTTP Message Signatures model and include:
 
 - `Signature-Input` describing covered components, key ID, creation time,
   expiration time, and nonce;
@@ -241,10 +243,61 @@ operations:
   history; and
 - cursor/replay operations will be versioned separately.
 
+Request subscriptions declare one of two immutable modes:
+
+- `exclusive`: services in an approved consumer group compete for one logical
+  request route. If an assigned service dies, an expired fenced assignment lets
+  another eligible service of the same type continue the same route without a
+  new request or duplicate completion.
+- `inclusive`: each matching stable destination service receives and completes
+  its own route. One destination's failure or completion does not alter another
+  destination's route.
+
+A selector may include multiple approved state predicates. All predicates must
+be true in one consistent committed snapshot. The eligibility record retains
+the selector version and state revisions that were evaluated. Definitions are
+immutable; later state changes trigger reevaluation but cannot rewrite earlier
+decisions or work history.
+
 Subscription state is durable and independent of current health. When delivery
 is paused for backpressure, the subscription remains active and its cursor does
 not advance until delivery is durably accepted under the chosen delivery
 protocol.
+
+Request acceptance is also independent of subscription state. The kernel first
+stores an accepted request without a concrete destination. If no eligible
+subscription matches its action and approved schemas, the request waits
+durably without a route. Committing a later matching subscription makes both
+new and already-pending requests eligible for routing. The source neither polls
+for service discovery nor resubmits solely because the subscriber was absent.
+
+The kernel materializes exclusive work once under a unique request/consumer-
+group key and inclusive work once under each request/destination key. A request
+may therefore fail over inside an exclusive group or fan out to many inclusive
+destinations without duplicating the relevant completion boundary. Each route
+records the subscription that caused its wakeup, current state, append-only
+state transitions, active and historical work claims, and scoped completion.
+Completion of one route never marks another route complete.
+
+The subscription registry remains the interest and wakeup index. Durable route
+records remain the work ledger. The scheduler joins the two to select the next
+incomplete, unclaimed route for an active and available subscriber; completed
+routes are never woken again. Replayed scans and resubmissions return the
+existing request/route identities rather than creating duplicate work.
+
+Assignments and work claims use bounded leases and fencing tokens. A new
+assignment atomically advances the route revision and fence. Renew, release,
+and complete operations must present that current revision, assignment, claim,
+and fence, so a recovered or delayed process cannot mutate work after failover.
+The kernel records exactly one completion per route; destination services must
+also apply the request/route idempotency key to their own external side effects.
+
+Subscription creation and request acceptance must be race-safe: either commit
+order produces the same retained request and eventual routing eligibility.
+Absence, backpressure, failed health, and failed handshake pause delivery; they
+never delete the request. Only explicit expiry, cancellation, rejection, or a
+terminal delivery-policy decision can end pending delivery, and that transition
+is durable and audited.
 
 The typed subscription domain and PostgreSQL repository are implemented.
 Subscriptions belong to stable service IDs rather than process instance IDs.
@@ -300,6 +353,11 @@ stale reports as unavailable for new work, not as proof that the service is
 dead.
 
 ## Required durable records
+
+All records below live authoritatively in PostgreSQL. Kernel memory, local
+files, and transport buffers are disposable and cannot advance a cursor,
+assignment, claim, or acknowledgement. A restarted kernel reconstructs pending
+delivery solely from these database records.
 
 - service identities;
 - public keys with activation, expiry, and revocation metadata;

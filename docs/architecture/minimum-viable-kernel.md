@@ -13,6 +13,21 @@ policy, coordinates work, and records consequential actions without owning the
 business object model of every connected service. The kernel implementation
 target is Rust, with PostgreSQL as its durable system of record.
 
+PostgreSQL is the kernel's only authoritative state store. Every kernel process
+is ephemeral and replaceable; process memory may contain only disposable or
+recomputable runtime material and a deliberately ephemeral instance private
+key. No accepted request, route, subscription cursor, assignment, claim,
+decision, idempotency result, or audit fact may exist only in memory or on a
+kernel filesystem.
+
+The hub uses durable store-and-forward routing. Services communicate with the
+kernel, not with one another, and do not discover one another's identities or
+runtime instances. A request is accepted and stored even when no eligible
+matching subscription exists. The kernel expands one request into zero or more
+exclusive-group or inclusive-destination routes as subscriptions match. Each
+route remains independently pending until completed or until an explicit
+expiry, cancellation, or terminal policy decision is durably recorded.
+
 The only general non-administrative object defined by the kernel is a
 **Request**. Connected services own the schemas, action vocabulary, artifacts,
 and permission-policy vocabulary for their business domains. The kernel owns
@@ -32,7 +47,17 @@ kernel unless it is explicitly marked otherwise.
 - **External user subject** — optional provenance asserted by an authenticated
   service; it is not a kernel principal or credential.
 - **Request** — the immutable, signed, durable communication envelope submitted
-  by one service for a destination service or kernel coordination function.
+  by one service. It declares intent and matching metadata but no concrete
+  destination service.
+- **Request route** — a kernel-owned administrative record binding one request
+  to either one exclusive consumer group or one inclusive subscription
+  destination. It carries that target's independent routing/work state and
+  exposes no destination discovery information to the source service.
+- **Exclusive subscription** — a competing-consumer subscription for which one
+  request/consumer-group route may be assigned to only one eligible service at
+  a time and may be reassigned after a fenced lease expires.
+- **Inclusive subscription** — a fan-out subscription for which every matching
+  stable destination service owns an independent request route and completion.
 - **Action name** — a service-owned, namespaced action declared by an approved
   artifact and permission-policy schema; it is not a kernel-wide enum.
 - **Artifact** — service-owned content carried by reference or value in a
@@ -59,7 +84,6 @@ A governed request MUST carry or resolve at least:
 
 - a stable request ID;
 - authenticated source service, instance, and key IDs;
-- a destination service or explicit kernel coordination destination;
 - a namespaced action;
 - artifact type, schema name, schema version, and schema owner;
 - permission-policy schema name, version, and owner;
@@ -72,6 +96,47 @@ namespace. Publication MUST NOT activate a schema, authorize the publisher, or
 create a grant. A security administrator MUST explicitly approve schema
 versions and bind identities to permissions. The kernel MUST make and retain
 the final allow-or-deny result.
+
+## Authoritative state boundary
+
+- Every recoverable kernel fact MUST be stored in PostgreSQL before success is
+  reported or an externally visible governed effect is released.
+- Fresh kernel processes MUST reconstruct all pending work, cursors, leases,
+  and decisions exclusively from PostgreSQL.
+- Memory caches MUST be disposable and MUST NOT authorize, route, assign,
+  claim, complete, acknowledge, or advance work without a current PostgreSQL
+  transaction.
+- Local files, container filesystems, Kubernetes objects, persistent volumes,
+  and message brokers MUST NOT be authoritative kernel state.
+- The ephemeral private signing key is intentionally not recoverable state. A
+  restarted instance creates a new identity/key pair and registers its public
+  record in PostgreSQL before becoming eligible.
+- PostgreSQL unavailability MUST make the kernel unready and fail closed for
+  governed mutations, security-sensitive reads, request acceptance, replay,
+  delivery, and work coordination.
+- In-memory repositories MAY exist only as isolated test doubles and MUST NOT
+  be used in production wiring.
+
+## Routing ledger
+
+The kernel separates immutable intent, interest, destination progress, and
+exclusive ownership:
+
+| Record | Identity and purpose | Multiplicity |
+| --- | --- | --- |
+| Request | Source-authenticated intent and matching metadata | One accepted record per source/request ID |
+| Subscription | A stable service's declared interest and wakeup cursor | Zero or more matches per request |
+| Request route | Deduplication and completion boundary for an exclusive group or inclusive destination | At most one per request/group or request/destination |
+| Route transition | Append-only evidence of ready, claimed, completed, paused, or terminal progress, including the applicable subscription | Many per route |
+| Work claim | Exclusive lease naming the worker currently handling a route | At most one active claim per route; history retained |
+
+An accepted request with no matching subscription is **unrouted**, not failed.
+When a subscription matches, the kernel idempotently creates or wakes the
+request route for that stable destination. The next-work query uses active
+subscription state and its durable cursor to find an incomplete route, then
+uses the work-claim contract to select one worker atomically. A completion is
+scoped to that route and records the subscription and worker responsible. It
+does not complete the parent request for any other destination.
 
 ## Core requirements
 
@@ -163,9 +228,12 @@ Invariants:
   it, or changing governed administrative state because of it.
 - Authorization MUST default to denial when no applicable grant or policy
   permits the request.
-- The decision MUST consider the authenticated source, destination, namespaced
-  action, artifact type and schema version, permission-policy schema version,
-  artifact or scope identifiers, and relevant administrative grants.
+- Request-acceptance authority MUST consider the authenticated source,
+  namespaced action, artifact type and schema version, permission-policy schema
+  version, artifact or scope identifiers, and relevant administrative grants.
+- Route authority MUST separately consider the kernel-derived destination,
+  matching subscription, and current destination-scoped grants before the
+  route is exposed, claimed, or delivered.
 - A service MUST be able to define the action and permission vocabulary for
   artifacts in its namespace without requiring a new kernel release.
 - A service-defined schema MUST be declarative data and MUST NOT contain
@@ -187,12 +255,13 @@ Acceptance criteria:
 - Registering a schema does not make it active and does not grant its publisher
   permission.
 - An active grant applies only to the schema version, action, artifact scope,
-  source, destination, and validity period it declares.
+  source, optional route destination, and validity period it declares.
 - Unknown, inactive, superseded, malformed, or conflicting policy schemas fail
   closed.
 - Security-relevant authorization outcomes identify the request, source,
-  destination, action, artifact schema, policy schema, applicable grant, and
-  administrator-controlled policy revision.
+  action, artifact schema, policy schema, applicable grant, and
+  administrator-controlled policy revision, plus the route destination and
+  subscription when the decision is destination-specific.
 
 Implementation status:
 
@@ -208,12 +277,32 @@ Invariants:
 - Every request MUST have a stable ID unique within its source identity's
   namespace and MUST be permanently bound to one semantic request fingerprint.
 - A request ID MUST NOT be reassigned to different content, action, artifact
-  schema, permission schema, destination, or routing intent.
+  schema, permission schema, or routing intent.
 - The authenticated request envelope and content digest MUST become durable
   before the kernel reports acceptance.
-- A request MUST identify its source, destination, namespaced action, artifact
-  descriptor, permission-policy schema reference, correlation metadata, and
-  creation time.
+- A request MUST identify its source, namespaced action, artifact descriptor,
+  permission-policy schema reference, correlation metadata, and creation time.
+- A request MUST NOT name or expose a concrete destination service. The kernel
+  derives destination routes only from authorized matching subscriptions.
+- Request acceptance and durable storage MUST NOT depend on a matching active
+  subscription, reachable destination instance, current health, or available
+  delivery capacity.
+- A request without an eligible matching subscriber MUST remain durably
+  unrouted; it MUST NOT be rejected or silently discarded merely because no
+  subscriber exists yet.
+- A matching subscription MUST materialize at most one exclusive route for the
+  request/consumer group or one inclusive route for the request/stable
+  destination. Those unique keys MUST make repeated scans, retries, and
+  subscription wakeups idempotent.
+- One request MAY have routes to many destination services. Every route MUST
+  have its own state and append-only transition history.
+- Completing one route MUST record the subscription and destination for which
+  it completed and MUST NOT complete, cancel, or advance another route.
+- The current worker MUST be represented by the route's active work claim;
+  completed and expired claims MUST remain available to show who worked or
+  attempted the route.
+- A source MUST NOT receive destination discovery information. The kernel owns
+  subscriber discovery, instance selection, handshake, and delivery.
 - Request acceptance MUST NOT imply authorization, delivery, work completion,
   or acceptance of the artifact by the destination service.
 - Business-domain objects MUST remain service-owned artifacts rather than
@@ -224,21 +313,31 @@ Acceptance criteria:
 - A successfully accepted request remains addressable after process restart.
 - Retrying the same semantic request under the same request ID does not create
   another request.
-- Reusing a request ID with a different destination, action, schema reference,
-  artifact digest, or payload is rejected deterministically.
+- Reusing a request ID with a different action, schema reference, artifact
+  digest, or payload is rejected deterministically.
 - The kernel can route a previously accepted request without interpreting its
   service-specific artifact content.
+- A request accepted before its matching subscription exists becomes eligible
+  for delivery after that subscription is committed, without source resubmission.
+- A subscription-creation race cannot lose a matching pending request or create
+  more than one accepted request record.
+- Two matching destination services produce two independently tracked routes;
+  completing either route leaves the other route eligible for work.
+- Replaying backlog scans or wakeups cannot create duplicate work for an
+  existing exclusive-group or inclusive-destination route.
 
 Implementation status:
 
 - Complete: the typed immutable core records a stable Request ID, source
-  service, destination service, and validated namespaced action.
+  service, and validated namespaced action without a concrete destination.
 - Complete: the core contract has an independently runnable test and exposes
   no field mutation operations.
 - Partial foundation: the implemented replay layer permanently binds a source
   service and request ID to a semantic fingerprint.
 - Pending: PostgreSQL durability, authenticated-envelope construction, artifact
-  descriptor, schema references, correlation relationships, and routing state.
+  descriptor, schema references, correlation relationships, exclusive-group
+  and inclusive-destination route records and transition history, and
+  subscription-triggered backlog routing.
 
 ### ILK-004: Versions
 
@@ -354,9 +453,9 @@ Invariants:
   successful transaction as their governed state change.
 - Audit records MUST NOT be updated or deleted through kernel contracts.
 - Each record MUST include its event type, request ID where applicable, source
-  and destination services, instance and key, namespaced action, artifact and
-  permission schema versions, administrative revision, time, outcome, and
-  correlation ID.
+  service, instance and key, namespaced action, artifact and permission schema
+  versions, administrative revision, time, outcome, and correlation ID. Route
+  records additionally include destination service and subscription.
 - Schema publication, activation, suspension, supersession, grant, revocation,
   connection, routing, replay, delivery, and work decisions MUST be auditable.
 
@@ -402,6 +501,29 @@ Invariants:
   through kernel contracts.
 - A subscription MUST identify its stable service owner and one or more
   approved request, event, artifact, or work types.
+- A request-receiving subscription MUST declare `exclusive` or `inclusive`
+  delivery semantics; an omitted or unknown mode MUST fail closed.
+- An exclusive subscription MUST declare an approved consumer-group identity.
+  All services in that group compete for one request/group route and one
+  completion; failover reassigns that route rather than resubmitting the request.
+- An inclusive subscription MUST create an independent route for every matching
+  stable destination service within the request's routing window.
+- A subscription MAY require multiple typed state predicates. The minimum
+  semantics MUST be `all_of`, evaluated from one consistent committed snapshot;
+  every predicate must be true before a route becomes eligible.
+- Subscription modes, group identities, selectors, predicate sets, referenced
+  schema versions, and routing-window policies MUST be immutable after creation.
+  Replacement creates a new version and preserves the old definition.
+- Selector predicates MUST be declarative approved fields and fixed operators;
+  caller-supplied SQL, code, database identifiers, and executable expressions
+  are forbidden.
+- Committing a subscription MUST make pre-existing matching pending requests
+  eligible for routing; subscription timing MUST NOT determine whether a
+  request is retained.
+- The subscription registry supplies eligible destination services and wakeup
+  cursors; it MUST NOT be overwritten with route progress or work history.
+- The kernel MUST use a durable subscription cursor or equivalent wakeup marker
+  to find both new and pre-existing matching requests without loss.
 - Subscription changes MUST be authorized and audited.
 - Delivery MUST obey the shared readiness/capacity health model without
   deleting or disabling durable subscription state.
@@ -413,6 +535,24 @@ Acceptance criteria:
 
 - A service receives or can retrieve only requests or events matching its
   active subscriptions, destination, approved schemas, and authorization scope.
+- With no matching subscription, an accepted request remains durably pending.
+  Creating an eligible matching subscription later exposes that backlog to the
+  subscriber without requiring the source to retry or know the subscriber's
+  runtime identity.
+- The scheduler selects the next incomplete route using active subscription,
+  authorization, readiness, handshake, and capacity state. It skips completed
+  routes and routes protected by an active work claim.
+- If an exclusive destination instance or service fails, its assignment lease
+  expires and the same route can be fenced and reassigned to another eligible
+  service in the consumer group. No new request is created.
+- A stale worker cannot renew, release, or complete a reassigned route because
+  every mutation requires the current route revision, assignment ID, claim ID,
+  and fencing token.
+- Concurrent evaluation produces at most one exclusive request/group route or
+  one inclusive request/destination route. Exactly one active assignment, one
+  active claim, and one successful completion may exist per route.
+- The selector version and state revisions used for each eligibility decision
+  remain queryable; later state mutations do not rewrite prior decisions.
 - Disabling a subscription prevents new deliveries without deleting its
   history.
 - Saturation, stale health, or lack of capacity pauses delivery and later
@@ -429,7 +569,9 @@ Implementation status:
   signed proof-of-possession reconciliation; append-only handshake persistence;
   failure isolation; fresh-handshake delivery gate; and isolated plus live
   persistence tests.
-- Pending: signed REST operations, ILK-002 authorization integration, delivery
+- Pending: typed delivery modes, consumer groups, immutable all-of state
+  selectors, signed REST operations, ILK-002 authorization integration, pending
+  request backlog matching, fenced route assignment and completion, delivery
   cursors, production outbound handshake transport, and capacity-aware delivery.
 
 ### ILK-011: Work claims
@@ -444,12 +586,20 @@ Invariants:
 - Claims MUST expire or be explicitly released so abandoned work can be
   recovered.
 - Only the current claim holder may complete or release claimed work.
+- A claim MUST be bound to the route revision, assignment ID, worker service and
+  instance, lease, and monotonically increasing fencing token.
+- Route reassignment MUST occur only after atomic release, expiry, or an
+  authorized revocation transition. Liveness observations alone MUST NOT
+  silently transfer ownership.
 
 Acceptance criteria:
 
 - Concurrent claim attempts produce exactly one active holder.
 - Another worker can claim work after the prior claim expires.
 - A stale holder cannot complete work after losing its claim.
+- Concurrent failover and completion produce one winner: either the current
+  holder completes, or reassignment advances the fence and makes that holder
+  stale.
 
 ### ILK-012: Idempotency
 

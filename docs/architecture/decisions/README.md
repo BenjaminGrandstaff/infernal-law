@@ -33,3 +33,5 @@ They preserve the context and tradeoffs behind a decision.
 | [ADR-0006: Store instance public keys and leases in PostgreSQL](0006-store-instance-public-keys-in-postgresql.md) | Accepted | 2026-08-28 |
 | [ADR-0007: Expose no SQL command surface](0007-expose-no-sql-command-surface.md) | Accepted | 2026-08-28 |
 | [ADR-0008: Use Kubernetes TokenReview for initial enrollment](0008-use-kubernetes-tokenreview-for-initial-enrollment.md) | Accepted | 2026-08-28 |
+| [ADR-0009: Use explicit subscription delivery modes and leased route assignments](0009-use-explicit-subscription-delivery-modes.md) | Accepted | 2026-08-29 |
+| [ADR-0010: Use PostgreSQL as the only kernel state store](0010-use-postgresql-as-the-only-kernel-state-store.md) | Accepted | 2026-08-29 |

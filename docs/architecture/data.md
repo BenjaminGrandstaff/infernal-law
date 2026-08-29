@@ -6,6 +6,13 @@
 
 ## Database
 
+PostgreSQL is the only durable and authoritative store for kernel-owned state.
+Kernel processes, containers, and pods are disposable. They do not own a local
+queue, journal, cursor, claim ledger, or recovery file. Every recoverable fact
+and every transition needed after restart must already be committed in
+PostgreSQL. See
+[ADR-0010](decisions/0010-use-postgresql-as-the-only-kernel-state-store.md).
+
 Local development uses PostgreSQL 17 with the pgvector extension. The
 project-specific image is defined in `containers/postgres/Containerfile`, and
 the extension is enabled during first-time database initialization.
@@ -56,12 +63,13 @@ repository contract. Kernel identity behavior remains independently testable
 without PostgreSQL, while the opt-in live integration test verifies durable
 identity state across new application connections.
 
-The minimum kernel requires durable records for identities, authority,
-resources and versions, typed relationships, artifacts, decisions, audit,
-events, subscriptions, work claims, and idempotency results. Logical and
-physical schemas for the remaining capabilities are design work; their
-constraints must enforce the [kernel invariants](minimum-viable-kernel.md), not
-merely represent the happy path.
+The minimum kernel requires PostgreSQL records for identities, authority,
+requests and versions, typed relationships, artifacts, decisions, audit,
+events/outbox delivery, subscriptions and wakeup cursors, routes and
+assignments, work claims, replay, and idempotency results. Logical and physical
+schemas for the remaining capabilities are design work; their constraints must
+enforce the [kernel invariants](minimum-viable-kernel.md), not merely represent
+the happy path.
 
 The service credential schema stores public-key fingerprints,
 public-key bytes, algorithms, instance and boot IDs, bounded lease revisions
@@ -117,6 +125,7 @@ secret-management facility rather than from source-controlled manifests.
 
 ## Backup and recovery
 
-TODO: Define recovery-point and recovery-time objectives before the database
-holds durable data. A local Podman volume is persistent across container
-restarts but is not a backup.
+All kernel recovery originates from PostgreSQL, so production recovery-point
+and recovery-time objectives, WAL retention, replication, restore rehearsal,
+and backup verification are required before production use. A local Podman
+volume is persistent across container restarts but is not a backup.

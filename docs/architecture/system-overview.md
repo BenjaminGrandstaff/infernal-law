@@ -12,6 +12,16 @@ separate service responsibility. The kernel provides durable, versioned
 resources and evidence while making authority, decisions, audit history,
 events, and work coordination explicit and traceable.
 
+Services know the kernel contract, not one another's identity or runtime
+topology. The kernel provides store-and-forward delivery: it durably retains a
+request when no matching service subscription exists, then materializes an
+independent route for each matching destination when subscribers appear.
+
+PostgreSQL is the only authoritative kernel state. Rust processes and
+Kubernetes pods are ephemeral compute: after failure they rebuild every queue,
+cursor, route, lease, and decision from PostgreSQL and never continue governed
+work from process memory or a local filesystem.
+
 ## Scope
 
 ### In scope
@@ -56,7 +66,7 @@ known.
 | --- | --- | --- | --- |
 | HTTP service | Exposes the application and health endpoints | Rust | `src/` |
 | Container image | Packages the service as a non-root process | Podman/OCI | `Containerfile` |
-| Database | Stores relational and vector data | PostgreSQL 17 with pgvector | `containers/postgres/` |
+| Database | Sole authoritative kernel state, recovery source, and relational/vector store | PostgreSQL 17 with pgvector | `containers/postgres/` |
 | Runtime deployment | Runs and exposes the service | Kubernetes | `k8s/base/` |
 | Instance key agent | Generates a unique in-process keypair and registers only the leased public record through the kernel | Rust/kernel REST API | Partial |
 | Initial enrollment verifier | Binds key possession to Kubernetes TokenReview and an enabled workload mapping | Rust/Kubernetes/PostgreSQL | Implemented |
@@ -79,14 +89,21 @@ known.
 3. The kernel checks authority and validates current versioned state.
 4. The kernel atomically stores the state change, audit record, promised event,
    and idempotent result.
-5. After commit, subscribed workers can receive or retrieve the typed event and
-   safely claim associated work.
+5. If no eligible subscriber exists, the request or event remains durably
+   unrouted; acceptance is not rolled back and the source need not discover a
+   receiver.
+6. Each matching subscription destination gets one idempotently materialized
+   route with independent progress and completion history.
+7. The kernel wakes the next incomplete, unclaimed route subject to admission,
+   authority, handshake, health, and capacity; workers claim that route and
+   completion is recorded only for its subscription destination.
 
 ## Data
 
-PostgreSQL is the planned system of record and pgvector provides vector-column
-and similarity-search support. The application schema, data ownership,
-retention, and sensitivity classification remain to be defined. See the
+PostgreSQL is the system of record for all kernel-owned state and pgvector
+provides vector-column and similarity-search support. Application processes
+hold no recoverable state. The remaining schema, retention, backup, and
+sensitivity details are defined or tracked in the
 [data architecture](data.md).
 
 ## Quality goals
@@ -118,6 +135,8 @@ Rank the few qualities that drive architectural tradeoffs.
 
 - [ADR-0003: Use direct signed REST communication](decisions/0003-direct-signed-service-rest.md)
 - [ADR-0005: Use ephemeral per-instance service keys](decisions/0005-use-ephemeral-per-instance-service-keys.md)
+- [ADR-0009: Use explicit subscription delivery modes and leased route assignments](decisions/0009-use-explicit-subscription-delivery-modes.md)
+- [ADR-0010: Use PostgreSQL as the only kernel state store](decisions/0010-use-postgresql-as-the-only-kernel-state-store.md)
 - [ADR-0006: Store instance public keys and leases in PostgreSQL](decisions/0006-store-instance-public-keys-in-postgresql.md)
 - [ADR-0007: Expose no SQL command surface](decisions/0007-expose-no-sql-command-surface.md)
 - [ADR-0008: Use Kubernetes TokenReview for initial enrollment](decisions/0008-use-kubernetes-tokenreview-for-initial-enrollment.md)
