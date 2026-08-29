@@ -57,6 +57,8 @@ tests/
 ├── enrollment_contract.rs  # independently runnable enrollment policy
 ├── enrollment_json_contract.rs
 │                            # independently runnable JSON DTO contract
+├── enrollment_http_contract.rs
+│                            # independently runnable POST handler contract
 ├── kernel_requirements.rs  # independently runnable public kernel test
 ├── postgres_identity_repository.rs
 │                            # opt-in ILK-001 durability test
@@ -88,6 +90,7 @@ cargo test --test instance_keys_contract
 cargo test --test instance_registry_contract
 cargo test --test enrollment_contract
 cargo test --test enrollment_json_contract
+cargo test --test enrollment_http_contract
 cargo test --test kernel_requirements
 ```
 

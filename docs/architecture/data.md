@@ -58,9 +58,9 @@ The service credential schema stores public-key fingerprints,
 public-key bytes, algorithms, instance and boot IDs, bounded lease revisions
 and expiry, activation/revocation state, enrollment provenance, and handshake
 results. PostgreSQL is authoritative for this kernel-managed registry. The
-repository, initial Kubernetes TokenReview enrollment contract, and application
-wiring are implemented; the HTTP transport and renewal authentication remain
-pending. Private signing keys are not
+repository, initial Kubernetes TokenReview enrollment contract, application
+wiring, and bounded JSON enrollment submission route are implemented; outbound
+challenge delivery and renewal authentication remain pending. Private signing keys are not
 database or Kubernetes Secret data: each service process generates its own key
 and retains it only for that process lifetime. See
 [ADR-0006](decisions/0006-store-instance-public-keys-in-postgresql.md).

@@ -58,8 +58,8 @@ known.
 | Container image | Packages the service as a non-root process | Podman/OCI | `Containerfile` |
 | Database | Stores relational and vector data | PostgreSQL 17 with pgvector | `containers/postgres/` |
 | Runtime deployment | Runs and exposes the service | Kubernetes | `k8s/base/` |
-| Instance key agent | Generates a unique in-process keypair and registers only the leased public record through the kernel | Rust/kernel contract; REST pending | Partial |
-| Initial enrollment verifier | Binds key possession to Kubernetes TokenReview and an enabled workload mapping | Rust/Kubernetes/PostgreSQL | Implemented; REST pending |
+| Instance key agent | Generates a unique in-process keypair and registers only the leased public record through the kernel | Rust/kernel REST API | Partial |
+| Initial enrollment verifier | Binds key possession to Kubernetes TokenReview and an enabled workload mapping | Rust/Kubernetes/PostgreSQL | Implemented |
 | Instance registry | Owns public keys, bounded leases, and registration history | Rust/PostgreSQL | Implemented |
 | Kernel discovery reconciler | Finds subscribed instances and performs mutual proof-of-possession handshakes | Rust | Planned |
 

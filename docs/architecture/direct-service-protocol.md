@@ -102,6 +102,16 @@ therefore deliberately has no debug representation. Public error DTOs collapse
 authentication failures to `enrollment_rejected` and infrastructure failures
 to `internal_error`; neither tokens nor repository messages cross the wire.
 
+`POST /v1/enrollments` is the only initial-enrollment submission route. It
+requires an `application/json` media type, rejects transfer encoding and
+ambiguous length/type headers, and caps the complete JSON body at 40 KiB before
+deserialization. Successful authentication returns `201` with the typed leased
+instance record. Malformed input, authentication rejection, and unavailable
+infrastructure return typed JSON errors without reflecting request data.
+Challenge issuance remains an internal kernel operation used by the future
+discovery reconciler. There is deliberately no unauthenticated HTTP endpoint
+that lets a caller create challenges for arbitrary service IDs.
+
 ## Verification order
 
 For every non-public request, the kernel MUST:
