@@ -68,6 +68,7 @@ tests/
 ├── database_connection.rs  # opt-in live PostgreSQL test
 ├── http_contract.rs        # independently runnable public HTTP test
 ├── identity_contract.rs    # independently runnable ILK-001 contract
+├── authority_contract.rs   # independently runnable ILK-002 contract
 ├── request_contract.rs     # independently runnable ILK-003 contract
 ├── instance_keys_contract.rs
 │                            # per-instance key isolation/signature contract
@@ -130,6 +131,7 @@ Run one integration-test file as its own test target:
 ```sh
 cargo test --test http_contract
 cargo test --test identity_contract
+cargo test --test authority_contract
 cargo test --test request_contract
 cargo test --test instance_keys_contract
 cargo test --test instance_registry_contract

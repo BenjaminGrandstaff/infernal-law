@@ -300,10 +300,18 @@ Acceptance criteria:
 
 Implementation status:
 
-- Pending: kernel-owned grant and schema storage/administration, fact
-  assembly for both decision points, the policy-evaluator client call and its
-  fail-closed handling, decision-pinning audit records, and a reference
-  external policy evaluator implementation (ADR-0013).
+- Complete: the typed domain contract — `Grant`, `Scope`, `PolicyBundleVersion`,
+  `PolicyFacts` (shared by both decision points), `Verdict`, and the pinned
+  `AuthorityDecision` — plus the `AuthorityRepository` and `PolicyEvaluator`
+  trait boundary and `AuthorityService::authorize`, with an independently
+  runnable contract test covering default-deny, grant matching and expiry,
+  wildcard scope, fail-closed evaluator handling, and that request-acceptance
+  and route decisions never share a grant.
+- Pending: PostgreSQL-backed grant and schema storage/administration, an
+  authenticated network `PolicyEvaluator` implementation and the outbound
+  signed-call machinery it needs, durable decision-pinning audit records, a
+  reference external policy evaluator service, and wiring this stage into
+  `ServiceRequestGate` (ADR-0013).
 - The existing signature, replay, and communication-admission gate is the
   required precondition and MUST remain ahead of this authority step.
 
