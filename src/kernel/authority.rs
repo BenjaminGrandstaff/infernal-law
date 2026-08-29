@@ -281,6 +281,34 @@ impl Grant {
         self.id
     }
 
+    pub const fn source(&self) -> ActorId {
+        self.source
+    }
+
+    pub const fn action(&self) -> &ActionName {
+        &self.action
+    }
+
+    pub const fn scope(&self) -> &Scope {
+        &self.scope
+    }
+
+    pub const fn schema_versions(&self) -> SchemaVersionRefs {
+        self.schema_versions
+    }
+
+    pub const fn destination(&self) -> Option<ActorId> {
+        self.destination
+    }
+
+    pub const fn valid_from(&self) -> i64 {
+        self.valid_from
+    }
+
+    pub const fn valid_until(&self) -> Option<i64> {
+        self.valid_until
+    }
+
     /// Whether this grant is currently in force and matches the given facts.
     /// Request-acceptance facts (no destination) only match non-destination
     /// grants; route facts only match grants scoped to that exact

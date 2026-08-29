@@ -2,6 +2,7 @@
 //! without placing infrastructure concerns inside capability modules.
 
 pub mod database;
+pub mod http_policy_evaluator;
 pub mod kubernetes_token_reviewer;
 pub mod postgres_admission_repository;
 pub mod postgres_authority_repository;

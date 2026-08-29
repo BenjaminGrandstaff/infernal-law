@@ -70,16 +70,28 @@ Five points settle the design:
 
 The policy evaluator is an ordinary service principal: it enrolls, holds
 keys, and signs exactly like every other service under
-[ADR-0003](0003-direct-signed-service-rest.md)/ILK-001. The kernel verifies
-the evaluator's response against its registered key exactly as it already
-verifies any inbound request. The kernel calls the evaluator the same way it
-already makes outbound authenticated calls during handshake reconciliation
-(ADR-0005) — as the signing party — with one addition beyond what ADR-0005
-left open: the evaluator establishes trust in the kernel's current signing
-key by fetching [`GET /v1/kernel-identity`](0014-publish-kernel-identity-endpoint.md)
-(ADR-0014), rather than relying on undefined static configuration. No other
-new trust mechanism is introduced for this security-critical path; it reuses
-machinery the kernel already has.
+[ADR-0003](0003-direct-signed-service-rest.md)/ILK-001, for whatever other
+authenticated calls it makes into the kernel. The call this ADR is actually
+about goes the other direction — the kernel calls the evaluator the same
+way it already makes outbound authenticated calls during handshake
+reconciliation (ADR-0005) — as the signing party — with one addition
+beyond what ADR-0005 left open: the evaluator establishes trust in the
+kernel's current signing key by fetching
+[`GET /v1/kernel-identity`](0014-publish-kernel-identity-endpoint.md)
+(ADR-0014), rather than relying on undefined static configuration.
+
+The evaluator's *response* to that one call is not separately signed at the
+application layer. It rides back over the same HTTPS connection the kernel
+itself opened to a specifically configured, trusted evaluator endpoint —
+there is no multi-hop or replay-across-time concern for a synchronous
+request/response on one connection the way there is for the general
+inbound-request model, which has to defend against a caller reachable from
+anywhere. Requiring the evaluator to also produce an application-layer
+signature over its response would mean designing a new signed-response
+shape with no existing kernel code path to verify it, for a threat this
+specific relationship does not have. No new trust mechanism is introduced
+for either direction; the outbound call reuses machinery the kernel already
+has, and the response is trusted the way any synchronous RPC response is.
 
 ### 2. Fail-closed
 

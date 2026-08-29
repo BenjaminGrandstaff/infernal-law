@@ -362,12 +362,28 @@ Implementation status:
   implements the signing side of ADR-0003 and verifying a kernel identity
   against `GET /v1/kernel-identity`, and this repository's own test suite
   proves a request it signs is accepted by the kernel's real, unmodified
-  `ServiceRequestVerifier` (`tests/infernal_client_rs_wire_compatibility.rs`,
-  a dev-dependency only — the kernel does not depend on it at runtime yet).
-- Pending: an authenticated network `PolicyEvaluator` implementation that
-  actually uses this machinery to call an evaluator, a reference external
-  policy evaluator service, and wiring this stage into `ServiceRequestGate`
-  (ADR-0013).
+  `ServiceRequestVerifier` (`tests/infernal_client_rs_wire_compatibility.rs`).
+  `infernal-client-rs` is now a runtime dependency (git, pinned to a
+  commit), not only a dev-dependency.
+- Complete: `HttpPolicyEvaluator` (`src/infrastructure/http_policy_evaluator.rs`)
+  implements `PolicyEvaluator` as a real signed HTTP call, using
+  `infernal-client-rs`'s `sign_with` to sign with the kernel's own
+  long-lived instance credential — the same key `GET /v1/kernel-identity`
+  publishes — rather than a second key nothing would recognize. Any
+  non-2xx status, network failure, or malformed/unrecognized response body
+  is surfaced as `AuthorityError::Evaluator`, which `AuthorityService`
+  already turns into a fail-closed denial. Colocated tests verify the
+  signed request independently against the kernel's own
+  `ServiceRequestVerifier` and verify response parsing without any network
+  dependency. Per [ADR-0013](decisions/0013-external-stateless-policy-evaluator-for-authority.md)'s
+  refined design, only the kernel's outbound call is signed at the
+  application layer; the evaluator's response is trusted over the same
+  HTTPS connection the kernel itself opened, not by a second signature.
+- Pending: a reference external policy evaluator service to actually call,
+  wiring `HttpPolicyEvaluator` into `Application`/`ServiceRequestGate`
+  (which needs a configured evaluator endpoint and, ultimately, a running
+  evaluator to reach), and schema registration/activation for whatever
+  schema versions real grants end up referencing (ADR-0013).
 - The existing signature, replay, and communication-admission gate is the
   required precondition and MUST remain ahead of this authority step.
 

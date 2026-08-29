@@ -530,7 +530,7 @@ dependencies = [
 [[package]]
 name = "infernal-client-rs"
 version = "0.1.0"
-source = "git+https://github.com/BenjaminGrandstaff/infernal-client-rs?rev=fc0c0f39eff1e58586c758c3910267bf9605421c#fc0c0f39eff1e58586c758c3910267bf9605421c"
+source = "git+https://github.com/BenjaminGrandstaff/infernal-client-rs?rev=3c263ce466d77a98b24e4b784b140e2fd13c7ec1#3c263ce466d77a98b24e4b784b140e2fd13c7ec1"
 dependencies = [
  "base64",
  "ed25519-dalek",

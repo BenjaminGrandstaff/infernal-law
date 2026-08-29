@@ -22,6 +22,8 @@ src/
 │   │                        # read-only communication admission check
 │   ├── postgres_authority_repository.rs
 │   │                        # read-only ILK-002 grant matching
+│   ├── http_policy_evaluator.rs
+│   │                        # ILK-002 PolicyEvaluator over signed REST
 │   ├── postgres_enrollment_binding_repository.rs
 │   │                        # workload mappings and one-time challenges
 │   ├── postgres_identity_repository.rs
