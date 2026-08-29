@@ -44,6 +44,13 @@ kernel unless it is explicitly marked otherwise.
   stable identity and one or more registered public keys.
 - **Worker** — a service principal that consumes events or claims work for
   processing.
+- **Scheduler** — an ordinary, non-privileged service principal that reads the
+  kernel's eligible-route query and decides which eligible route runs next and
+  on which worker or node. It owns optimization policy (ordering, priority,
+  affinity, resource-class placement, capacity, backpressure timing, retry
+  timing); it holds no elevated database access and cannot bypass claim
+  arbitration. See
+  [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md).
 - **External user subject** — optional provenance asserted by an authenticated
   service; it is not a kernel principal or credential.
 - **Request** — the immutable, signed, durable communication envelope submitted
@@ -132,11 +139,16 @@ exclusive ownership:
 
 An accepted request with no matching subscription is **unrouted**, not failed.
 When a subscription matches, the kernel idempotently creates or wakes the
-request route for that stable destination. The next-work query uses active
-subscription state and its durable cursor to find an incomplete route, then
-uses the work-claim contract to select one worker atomically. A completion is
-scoped to that route and records the subscription and worker responsible. It
-does not complete the parent request for any other destination.
+request route for that stable destination. The kernel's next-work query uses
+active subscription state and its durable cursor to expose which incomplete
+routes are eligible; it does not select which one runs next or on which
+worker — that policy belongs to an external scheduler service (see
+[ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md)). The
+work-claim contract then atomically arbitrates whichever claim a scheduler
+requests: authorized, still eligible, unclaimed, and fencing-current, or
+rejected. A completion is scoped to that route and records the subscription
+and worker responsible. It does not complete the parent request for any other
+destination.
 
 ## Core requirements
 
@@ -528,8 +540,9 @@ Invariants:
 - The kernel MUST use a durable subscription cursor or equivalent wakeup marker
   to find both new and pre-existing matching requests without loss.
 - Subscription changes MUST be authorized and audited.
-- Delivery MUST obey the shared readiness/capacity health model without
-  deleting or disabling durable subscription state.
+- Pausing or deferring delivery for readiness, health, or capacity reasons is
+  scheduler policy (ADR-0011) and MUST NOT delete or disable durable
+  subscription state.
 - Every kernel instance MUST continuously discover reachable instances for
   active subscriptions and complete a fresh, mutual proof-of-possession
   handshake before delivering to an instance.
@@ -542,9 +555,12 @@ Acceptance criteria:
   Creating an eligible matching subscription later exposes that backlog to the
   subscriber without requiring the source to retry or know the subscriber's
   runtime identity.
-- The scheduler selects the next incomplete route using active subscription,
-  authorization, readiness, handshake, and capacity state. It skips completed
-  routes and routes protected by an active work claim.
+- The kernel's eligibility query returns incomplete routes filtered by active
+  subscription, authorization, and handshake state, excluding completed routes
+  and routes protected by an active work claim. An external scheduler service
+  selects which eligible route to claim next and for which worker; readiness
+  and capacity are scheduler policy inputs, not kernel filters (see
+  [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md)).
 - If an exclusive destination instance or service fails, its assignment lease
   expires and the same route can be fenced and reassigned to another eligible
   service in the consumer group. No new request is created.
@@ -558,8 +574,9 @@ Acceptance criteria:
   remain queryable; later state mutations do not rewrite prior decisions.
 - Disabling a subscription prevents new deliveries without deleting its
   history.
-- Saturation, stale health, or lack of capacity pauses delivery and later
-  resumes from the last durable cursor.
+- A scheduler deferring claims for saturation, stale health, or lack of
+  capacity does not advance or lose the durable cursor; resumed claiming picks
+  up from the same eligible set (ADR-0011).
 - One unreachable subscriber does not prevent kernel startup or discovery of
   other subscribers; its delivery remains paused and is retried with backoff.
 
@@ -575,7 +592,11 @@ Implementation status:
 - Pending: typed delivery modes, consumer groups, immutable all-of state
   selectors, signed REST operations, ILK-002 authorization integration, pending
   request backlog matching, fenced route assignment and completion, delivery
-  cursors, production outbound handshake transport, and capacity-aware delivery.
+  cursors, production outbound handshake transport, and the eligible-route
+  query contract external scheduler services will use (ADR-0011).
+- Out of kernel scope: capacity-aware delivery, worker/node placement, and
+  retry-timing policy. Those belong to an external scheduler service, not the
+  kernel (ADR-0011).
 
 ### ILK-011: Work claims
 
@@ -693,8 +714,10 @@ The requirements intentionally do not choose these implementation details:
 - event transport and delivery guarantee;
 - subscription cursor and replay semantics;
 - claim lease duration and renewal protocol;
-- idempotency retention period; and
-- request payload/reference thresholds and storage-proxy limits.
+- idempotency retention period;
+- request payload/reference thresholds and storage-proxy limits; and
+- the eligible-route query contract's worker-class declaration, pagination,
+  and freshness semantics for external scheduler services (ADR-0011).
 
 Each consequential choice should be recorded as an ADR and linked back to the
 affected `ILK-*` requirements.

@@ -43,6 +43,12 @@ work from process memory or a local filesystem.
 - User registration, user credentials, sessions, and account recovery
 - Silently destructive updates to accepted history
 - Application-specific worker behavior beyond kernel coordination contracts
+- Scheduling policy: which eligible route runs next, worker/node preference,
+  priority, affinity, resource-class (for example GPU) placement, capacity
+  accounting, backpressure, and retry timing. These belong to an external
+  scheduler service — see
+  [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md) and
+  the reference `infernal-taskmaster-simple` implementation.
 - Capabilities beyond the documented [minimum viable kernel](minimum-viable-kernel.md)
   until they are separately specified
 
@@ -95,9 +101,12 @@ known.
    receiver.
 6. Each matching subscription destination gets one idempotently materialized
    route with independent progress and completion history.
-7. The kernel wakes the next incomplete, unclaimed route subject to admission,
-   authority, handshake, health, and capacity; workers claim that route and
-   completion is recorded only for its subscription destination.
+7. The kernel exposes incomplete, unclaimed routes eligible under admission,
+   authority, and handshake state. An external scheduler service selects which
+   eligible route runs next and on which worker, applying its own health,
+   capacity, and placement policy, then requests a claim; the kernel grants it
+   only after re-checking authorization, eligibility, and fencing, and records
+   completion only for that route's subscription destination.
 
 ## Data
 

@@ -5,6 +5,11 @@
 - Deciders: Project owner
 - Complements: [ADR-0003](0003-direct-signed-service-rest.md), [ADR-0006](0006-store-instance-public-keys-in-postgresql.md), [ADR-0007](0007-expose-no-sql-command-surface.md)
 - Related: ILK-003, ILK-007, ILK-008, ILK-010, ILK-011, ILK-012
+- Refined by: [ADR-0011](0011-move-scheduling-policy-outside-the-kernel.md), which
+  moves route *selection* (which eligible route runs next, on which worker)
+  to an external scheduler service. The kernel-owned uniqueness, fencing, and
+  transition rules below are unchanged; only who chooses among an eligible set
+  moves.
 
 ## Context
 
@@ -98,9 +103,14 @@ process-local projection can authorize, assign, fence, or complete work.
 The subscription registry is the interest index, not the work ledger. A
 durable cursor or wakeup marker ensures that either request-first or
 subscription-first commit order eventually evaluates the same match. The
-scheduler atomically selects an eligible incomplete route and creates its
-assignment/claim. Health, handshake, capacity, or instance failure pauses or
-expires assignment; it never deletes the request, route, or history.
+kernel exposes the resulting eligible-and-incomplete routes through a
+durable, authorization-filtered query; it does not itself choose which one
+runs next. An external scheduler service (see
+[ADR-0011](0011-move-scheduling-policy-outside-the-kernel.md)) selects among
+that eligible set and requests an assignment/claim, which the kernel grants
+only after re-checking authorization, eligibility, and fencing at claim time.
+Health, handshake, capacity, or instance failure pauses or expires assignment;
+it never deletes the request, route, or history.
 
 ## Consequences
 

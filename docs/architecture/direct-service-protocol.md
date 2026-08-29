@@ -17,7 +17,7 @@ Service state is deliberately separated into independent dimensions:
 | Subscription | Active event-type interests | Service through signed REST API | Which committed events it requests |
 | Liveness | Alive or dead | Health evaluator/Kubernetes | Whether the process needs restart |
 | Readiness | Ready or not ready | Health evaluator/Kubernetes | Whether the process should receive traffic |
-| Capacity | Available, saturated, or draining | Hub health/backpressure model | How much new event/work delivery it can accept |
+| Capacity | Available, saturated, or draining | Self-reported by the service; consumed by an external scheduler | How much new event/work delivery it can accept |
 
 No dimension implicitly changes another. In particular:
 
@@ -115,8 +115,11 @@ new kernel instance.
 Transport failures are recorded as per-instance reconciliation outcomes and do
 not stop later candidates. A transport implementation must impose a finite
 connection and response timeout. Delivery code must call the fresh-handshake
-gate in addition to checking admission, key/lease state, subscription state,
-health, and capacity. The production outbound HTTP transport remains pending.
+gate in addition to checking admission, key/lease state, and subscription
+state; health and capacity are scheduler-facing policy inputs, not kernel
+delivery gates (see
+[ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md)). The
+production outbound HTTP transport remains pending.
 
 Initial trust uses a separate bootstrap flow. The kernel issues a 30-second,
 single-use challenge stored as a digest in PostgreSQL. The candidate signs the
@@ -280,10 +283,14 @@ state transitions, active and historical work claims, and scoped completion.
 Completion of one route never marks another route complete.
 
 The subscription registry remains the interest and wakeup index. Durable route
-records remain the work ledger. The scheduler joins the two to select the next
-incomplete, unclaimed route for an active and available subscriber; completed
-routes are never woken again. Replayed scans and resubmissions return the
-existing request/route identities rather than creating duplicate work.
+records remain the work ledger. The kernel joins the two into an
+authorization-filtered eligibility query; an external scheduler service joins
+that eligible set with its own availability and placement policy to pick the
+next route/worker pair and request a claim (see
+[ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md)).
+Completed routes are never returned as eligible again. Replayed scans and
+resubmissions return the existing request/route identities rather than
+creating duplicate work.
 
 Assignments and work claims use bounded leases and fencing tokens. A new
 assignment atomically advances the route revision and fence. Renew, release,
@@ -307,7 +314,7 @@ authorization, and delivery cursors remain pending.
 
 ## Health model
 
-The service and hub use one underlying health evaluation with distinct views:
+The service uses one underlying health evaluation with distinct views:
 
 - `/health/live` reports only whether the local process can make progress and
   should remain running.
@@ -317,14 +324,20 @@ The service and hub use one underlying health evaluation with distinct views:
   as `accepting_work`, `max_in_flight`, `current_in_flight`, `available_slots`,
   `observed_at`, and optional `retry_after`.
 
-The Kubernetes readiness response and the hub's capacity decision MUST derive
-from the same internal health snapshot so they cannot disagree about whether
-the service is accepting new work. The liveness check remains intentionally
-minimal; overload alone MUST NOT cause restart loops.
+The Kubernetes readiness response and the signed health/capacity report MUST
+derive from the same internal health snapshot so they cannot disagree about
+whether the service is accepting new work. The liveness check remains
+intentionally minimal; overload alone MUST NOT cause restart loops.
 
-## Backpressure
+Per [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md),
+the kernel itself does not consume the capacity report to gate delivery — it
+is scheduler-facing input. The kernel's own eligibility gate and an external
+scheduler's backpressure policy are deliberately separate concerns, covered
+next.
 
-The hub may deliver a subscribed event or assign new work only when all of the
+## Kernel eligibility gate
+
+The kernel exposes a route as eligible for claiming only when all of the
 following are true:
 
 ```text
@@ -333,24 +346,43 @@ AND key_is_active
 AND instance_lease_is_fresh
 AND handshake_is_verified_and_fresh
 AND subscription_is_active
-AND service_is_ready
+```
+
+This is a correctness gate, not a scheduling decision: every predicate is
+kernel-owned state (identity, admission, credential, and handshake freshness)
+that determines whether a destination is even an authorized possible target.
+It contains no readiness, health, or capacity term.
+
+## Scheduler backpressure
+
+An external scheduler service (see
+[ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md))
+decides whether and when to request a claim for an eligible route, typically
+using:
+
+```text
+service_is_ready
 AND health_report_is_fresh
 AND available_capacity > 0
 ```
 
 Backpressure behavior:
 
-- not ready, stale health, draining, or zero capacity pauses new delivery;
-- the hub respects `retry_after` within configured bounds;
-- paused delivery does not delete subscriptions or mark the service dead;
+- not ready, stale health, or zero capacity is a scheduler reason to defer a
+  claim request, not a kernel rejection;
+- a scheduler SHOULD respect a destination's `retry_after` within its own
+  configured bounds;
+- deferring a claim does not delete subscriptions, routes, or mark the service
+  dead;
 - existing work claims follow their lease/expiry rules rather than being
   reassigned solely because of one failed health check;
-- repeated delivery attempts remain idempotent; and
+- repeated claim attempts remain idempotent under the kernel's claim contract;
+  and
 - recovery resumes from the last durably acknowledged cursor.
 
-Health reports are authenticated and timestamped. The hub treats missing or
-stale reports as unavailable for new work, not as proof that the service is
-dead.
+Health reports are authenticated and timestamped. A scheduler treats missing
+or stale reports as unavailable for new work, not as proof that the service is
+dead. The kernel does not interpret health reports at all.
 
 ## Required durable records
 
@@ -384,8 +416,8 @@ delivery solely from these database records.
 - A kernel startup verifies each reachable subscribed instance without being
   blocked by unavailable subscribers.
 - A disabled service is rejected even when its signature and health are valid.
-- An unhealthy or saturated enabled service can query permitted APIs, but the
-  hub assigns no new subscribed work until readiness/capacity recovers.
+- An unhealthy or saturated enabled service can query permitted APIs, but a
+  scheduler sends it no new claim requests until readiness/capacity recovers.
 - A healthy disabled service receives no governed communication.
 - Altering a signed method, path, query, body, digest, timestamp, nonce, or
   request ID causes rejection.
@@ -411,5 +443,9 @@ delivery solely from these database records.
    implemented; governed-operation idempotency results remain pending.
 8. Implement signed subscription REST contracts.
 9. Define the shared health snapshot and separate live, ready, and capacity
-   projections.
-10. Implement delivery backpressure and cursor recovery tests.
+   projections as scheduler-facing signals (ADR-0011).
+10. Implement cursor recovery tests; a scheduler service, not the kernel,
+    implements backpressure policy against the kernel's eligibility query.
+11. Define the kernel's eligible-route query contract (worker-class
+    declaration, pagination, freshness) that `infernal-taskmaster-simple` and
+    future scheduler services consume (ADR-0011).

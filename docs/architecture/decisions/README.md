@@ -35,3 +35,4 @@ They preserve the context and tradeoffs behind a decision.
 | [ADR-0008: Use Kubernetes TokenReview for initial enrollment](0008-use-kubernetes-tokenreview-for-initial-enrollment.md) | Accepted | 2026-08-28 |
 | [ADR-0009: Use explicit subscription delivery modes and leased route assignments](0009-use-explicit-subscription-delivery-modes.md) | Accepted | 2026-08-29 |
 | [ADR-0010: Use PostgreSQL as the only kernel state store](0010-use-postgresql-as-the-only-kernel-state-store.md) | Accepted | 2026-08-29 |
+| [ADR-0011: Move scheduling policy to an external scheduler service](0011-move-scheduling-policy-outside-the-kernel.md) | Accepted | 2026-08-29 |
