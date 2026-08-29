@@ -243,6 +243,306 @@ impl Grant {
     }
 }
 
+/// Maximum byte length of a namespaced schema name.
+pub const MAX_SCHEMA_NAME_LENGTH: usize = 200;
+
+/// Which namespace a schema version belongs to: the artifact content shape,
+/// or the permission vocabulary describing actions/fields for that content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SchemaKind {
+    Artifact,
+    PermissionPolicy,
+}
+
+/// A namespaced, dotted schema name owned by its publishing service, such as
+/// `billing.invoice`. Publishing the first version under a name claims it;
+/// later versions under the same name must keep the same owner.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct SchemaName(String);
+
+impl SchemaName {
+    pub fn new(value: &str) -> Result<Self, AuthorityError> {
+        if !is_valid_schema_name(value) {
+            return Err(AuthorityError::InvalidSchemaName);
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Display for SchemaName {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+fn is_valid_schema_name(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_SCHEMA_NAME_LENGTH {
+        return false;
+    }
+
+    let mut segments = value.split('.');
+    let Some(namespace) = segments.next() else {
+        return false;
+    };
+    let Some(first_segment) = segments.next() else {
+        return false;
+    };
+
+    is_valid_schema_segment(namespace)
+        && is_valid_schema_segment(first_segment)
+        && segments.all(is_valid_schema_segment)
+}
+
+fn is_valid_schema_segment(segment: &str) -> bool {
+    let mut bytes = segment.bytes();
+    matches!(bytes.next(), Some(b'a'..=b'z'))
+        && bytes
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-".contains(&byte))
+}
+
+/// SHA-256 content digest of a published schema's declarative document. The
+/// kernel treats schema content as opaque beyond this digest, exactly as it
+/// treats artifact content (ILK-006).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ContentDigest([u8; 32]);
+
+impl ContentDigest {
+    pub const fn from_bytes(value: [u8; 32]) -> Self {
+        Self(value)
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SchemaVersionId(Uuid);
+
+impl SchemaVersionId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub const fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub const fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+}
+
+impl Default for SchemaVersionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Display for SchemaVersionId {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        Display::fmt(&self.0, formatter)
+    }
+}
+
+impl FromStr for SchemaVersionId {
+    type Err = AuthorityError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(value)
+            .map(Self)
+            .map_err(|_| AuthorityError::InvalidSchemaVersionId)
+    }
+}
+
+/// An immutable, published schema version. Publishing MUST NOT activate a
+/// schema or grant its publisher any permission — [`SchemaStatus`] is a
+/// separate, administrator-controlled overlay on top of this fact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SchemaVersion {
+    id: SchemaVersionId,
+    kind: SchemaKind,
+    name: SchemaName,
+    version: i64,
+    owner: ActorId,
+    content_digest: ContentDigest,
+    predecessor: Option<SchemaVersionId>,
+    published_at: i64,
+}
+
+impl SchemaVersion {
+    /// Reconstructs a schema version with its already-assigned version
+    /// number, ID, and predecessor link. Used by repository adapters, which
+    /// alone decide the next version number and predecessor for a name
+    /// (ADR-0013's "kernel owns the facts" split applies here too: only the
+    /// repository knows the current state needed to assign these).
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore(
+        id: SchemaVersionId,
+        kind: SchemaKind,
+        name: SchemaName,
+        version: i64,
+        owner: ActorId,
+        content_digest: ContentDigest,
+        predecessor: Option<SchemaVersionId>,
+        published_at: i64,
+    ) -> Result<Self, AuthorityError> {
+        if version < 1 || published_at < 0 {
+            return Err(AuthorityError::InvalidSchemaVersion);
+        }
+        Ok(Self {
+            id,
+            kind,
+            name,
+            version,
+            owner,
+            content_digest,
+            predecessor,
+            published_at,
+        })
+    }
+
+    pub const fn id(&self) -> SchemaVersionId {
+        self.id
+    }
+
+    pub const fn kind(&self) -> SchemaKind {
+        self.kind
+    }
+
+    pub const fn name(&self) -> &SchemaName {
+        &self.name
+    }
+
+    pub const fn version(&self) -> i64 {
+        self.version
+    }
+
+    pub const fn owner(&self) -> ActorId {
+        self.owner
+    }
+
+    pub const fn content_digest(&self) -> ContentDigest {
+        self.content_digest
+    }
+
+    pub const fn predecessor(&self) -> Option<SchemaVersionId> {
+        self.predecessor
+    }
+
+    pub const fn published_at(&self) -> i64 {
+        self.published_at
+    }
+}
+
+/// An administrator-controlled schema lifecycle state. Only an authorized
+/// administrator may move a schema out of `Published`; the kernel never
+/// activates, suspends, supersedes, or retires a schema on its own.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SchemaStatus {
+    Published,
+    Active,
+    Suspended,
+    Superseded,
+    Retired,
+}
+
+/// A schema version paired with its current administrator-controlled
+/// status, as read from the repository.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SchemaRecord {
+    version: SchemaVersion,
+    status: SchemaStatus,
+}
+
+impl SchemaRecord {
+    pub const fn restore(version: SchemaVersion, status: SchemaStatus) -> Self {
+        Self { version, status }
+    }
+
+    pub const fn version(&self) -> &SchemaVersion {
+        &self.version
+    }
+
+    pub const fn status(&self) -> SchemaStatus {
+        self.status
+    }
+
+    pub const fn is_active(&self) -> bool {
+        matches!(self.status, SchemaStatus::Active)
+    }
+}
+
+/// Kernel-owned schema storage. Publication is a normal operation any
+/// authenticated service may invoke for names it owns; activation,
+/// suspension, supersession, and retirement are administrator-only and,
+/// like grant creation, happen out-of-band rather than through this trait.
+pub trait SchemaRepository: Send + Sync {
+    /// Atomically assigns the next version number and predecessor link for
+    /// `name` and publishes it. Returns
+    /// [`AuthorityError::SchemaNamespaceConflict`] if `name` already has a
+    /// published version owned by a different service.
+    fn publish(
+        &self,
+        kind: SchemaKind,
+        name: SchemaName,
+        owner: ActorId,
+        content_digest: ContentDigest,
+        published_at: i64,
+    ) -> Result<SchemaRecord, AuthorityError>;
+
+    fn find(
+        &self,
+        kind: SchemaKind,
+        name: &SchemaName,
+        version: i64,
+    ) -> Result<Option<SchemaRecord>, AuthorityError>;
+}
+
+#[derive(Clone)]
+pub struct SchemaService<R> {
+    repository: R,
+}
+
+impl<R> SchemaService<R>
+where
+    R: SchemaRepository,
+{
+    pub const fn new(repository: R) -> Self {
+        Self { repository }
+    }
+
+    /// Publishes a new schema version. Publication alone never activates the
+    /// schema or authorizes its publisher (ILK-002).
+    pub fn publish(
+        &self,
+        kind: SchemaKind,
+        name: SchemaName,
+        owner: ActorId,
+        content_digest: ContentDigest,
+        published_at: i64,
+    ) -> Result<SchemaRecord, AuthorityError> {
+        if published_at < 0 {
+            return Err(AuthorityError::InvalidSchemaVersion);
+        }
+        self.repository
+            .publish(kind, name, owner, content_digest, published_at)
+    }
+
+    pub fn find(
+        &self,
+        kind: SchemaKind,
+        name: &SchemaName,
+        version: i64,
+    ) -> Result<Option<SchemaRecord>, AuthorityError> {
+        self.repository.find(kind, name, version)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Verdict {
     Allow,
@@ -374,6 +674,10 @@ pub enum AuthorityError {
     InvalidPolicyBundleVersion,
     InvalidValidityWindow,
     InvalidGrantId,
+    InvalidSchemaName,
+    InvalidSchemaVersionId,
+    InvalidSchemaVersion,
+    SchemaNamespaceConflict(SchemaName),
     Repository(String),
     Evaluator(String),
 }
@@ -388,6 +692,16 @@ impl Display for AuthorityError {
                 .write_str("policy bundle version must be non-empty and within the length limit"),
             Self::InvalidValidityWindow => formatter.write_str("grant validity window is invalid"),
             Self::InvalidGrantId => formatter.write_str("grant ID must be a UUID"),
+            Self::InvalidSchemaName => formatter.write_str(
+                "schema name must be a dotted, namespaced, lower-case identifier within the length limit",
+            ),
+            Self::InvalidSchemaVersionId => formatter.write_str("schema version ID must be a UUID"),
+            Self::InvalidSchemaVersion => {
+                formatter.write_str("schema version number or publication time is invalid")
+            }
+            Self::SchemaNamespaceConflict(name) => {
+                write!(formatter, "schema name {name} is owned by a different service")
+            }
             Self::Repository(message) => {
                 write!(formatter, "authority repository failed: {message}")
             }

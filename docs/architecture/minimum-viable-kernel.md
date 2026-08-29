@@ -311,9 +311,23 @@ Implementation status:
   `PostgresAuthorityRepository`, and an idempotent, conflict-detecting,
   security-definer `create_authority_grant` administration function that the
   Rust kernel never calls directly — grants are administered out-of-band,
-  exactly as communication admission already is. Schema storage/activation
-  is not part of this: grants are the only piece built so far.
-- Pending: schema registration/activation storage, an authenticated network
+  exactly as communication admission already is.
+- Complete: the typed schema domain contract — `SchemaKind` (artifact vs.
+  permission-policy, independent namespaces even under the same name),
+  `SchemaName`, `ContentDigest`, and the immutable `SchemaVersion` chained to
+  its predecessor — plus `SchemaRepository`/`SchemaService::publish`, which
+  any authenticated service may call for names it owns to register a new
+  version without activating it, and which rejects a different service
+  publishing under an already-claimed name
+  (`AuthorityError::SchemaNamespaceConflict`). `SchemaStatus` (Published,
+  Active, Suspended, Superseded, Retired) exists as a value type read from
+  `SchemaRecord`; activation/suspension/supersession/retirement are
+  administrator-only and, like grant creation, are not yet backed by a
+  PostgreSQL adapter or an out-of-band administration function.
+- Pending: PostgreSQL-backed schema storage and the
+  activate/suspend/supersede/retire administration function, integrating
+  schema version references into `PolicyFacts`/`Grant` (deferred when the
+  pure fact/grant contract was first built), an authenticated network
   `PolicyEvaluator` implementation and the outbound signed-call machinery it
   needs, durable decision-pinning audit records, a reference external policy
   evaluator service, and wiring this stage into `ServiceRequestGate`

@@ -3,8 +3,10 @@
 use std::sync::{Arc, Mutex};
 
 use infernal_law::kernel::authority::{
-    AuthorityError, AuthorityRepository, AuthorityService, Grant, PolicyBundleVersion,
-    PolicyEvaluation, PolicyEvaluator, PolicyFacts, Scope, Verdict,
+    AuthorityError, AuthorityRepository, AuthorityService, ContentDigest, Grant,
+    PolicyBundleVersion, PolicyEvaluation, PolicyEvaluator, PolicyFacts, SchemaKind, SchemaName,
+    SchemaRecord, SchemaRepository, SchemaService, SchemaStatus, SchemaVersion, SchemaVersionId,
+    Scope, Verdict,
 };
 use infernal_law::kernel::identity::ActorId;
 use infernal_law::kernel::requests::ActionName;
@@ -28,6 +30,65 @@ impl AuthorityRepository for MemoryGrants {
             .filter(|grant| grant.permits(facts, now))
             .cloned()
             .collect())
+    }
+}
+
+#[derive(Clone, Default)]
+struct MemorySchemas(Arc<Mutex<Vec<SchemaRecord>>>);
+
+impl SchemaRepository for MemorySchemas {
+    fn publish(
+        &self,
+        kind: SchemaKind,
+        name: SchemaName,
+        owner: ActorId,
+        content_digest: ContentDigest,
+        published_at: i64,
+    ) -> Result<SchemaRecord, AuthorityError> {
+        let mut records = self.0.lock().unwrap();
+        let latest = records
+            .iter()
+            .filter(|record| record.version().kind() == kind && record.version().name() == &name)
+            .max_by_key(|record| record.version().version());
+        if let Some(latest) = latest {
+            if latest.version().owner() != owner {
+                return Err(AuthorityError::SchemaNamespaceConflict(name));
+            }
+        }
+        let next_version = latest.map_or(1, |record| record.version().version() + 1);
+        let predecessor = latest.map(|record| record.version().id());
+        let version = SchemaVersion::restore(
+            SchemaVersionId::new(),
+            kind,
+            name,
+            next_version,
+            owner,
+            content_digest,
+            predecessor,
+            published_at,
+        )?;
+        let record = SchemaRecord::restore(version, SchemaStatus::Published);
+        records.push(record.clone());
+        Ok(record)
+    }
+
+    fn find(
+        &self,
+        kind: SchemaKind,
+        name: &SchemaName,
+        version: i64,
+    ) -> Result<Option<SchemaRecord>, AuthorityError> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|record| {
+                record.version().kind() == kind
+                    && record.version().name() == name
+                    && record.version().version() == version
+            })
+            .cloned())
     }
 }
 
@@ -72,6 +133,14 @@ fn action(value: &str) -> ActionName {
 
 fn scope(value: &str) -> Scope {
     Scope::new(value).unwrap()
+}
+
+fn schema_name(value: &str) -> SchemaName {
+    SchemaName::new(value).unwrap()
+}
+
+fn digest(byte: u8) -> ContentDigest {
+    ContentDigest::from_bytes([byte; 32])
 }
 
 #[test]
@@ -272,5 +341,160 @@ fn invalid_grant_validity_window_is_rejected() {
             None,
         ),
         Err(AuthorityError::InvalidValidityWindow)
+    );
+}
+
+#[test]
+fn publishing_a_schema_never_activates_it() {
+    let schemas = SchemaService::new(MemorySchemas::default());
+    let owner = ActorId::new();
+
+    let record = schemas
+        .publish(
+            SchemaKind::Artifact,
+            schema_name("billing.invoice"),
+            owner,
+            digest(1),
+            1_000,
+        )
+        .unwrap();
+
+    assert_eq!(record.version().version(), 1);
+    assert_eq!(record.version().predecessor(), None);
+    assert_eq!(record.status(), SchemaStatus::Published);
+    assert!(
+        !record.is_active(),
+        "publication alone must not activate a schema"
+    );
+}
+
+#[test]
+fn later_versions_chain_to_their_predecessor_and_increment() {
+    let schemas = SchemaService::new(MemorySchemas::default());
+    let owner = ActorId::new();
+    let name = schema_name("billing.invoice");
+
+    let first = schemas
+        .publish(SchemaKind::Artifact, name.clone(), owner, digest(1), 1_000)
+        .unwrap();
+    let second = schemas
+        .publish(SchemaKind::Artifact, name, owner, digest(2), 2_000)
+        .unwrap();
+
+    assert_eq!(second.version().version(), 2);
+    assert_eq!(second.version().predecessor(), Some(first.version().id()));
+}
+
+#[test]
+fn a_different_service_cannot_publish_under_an_owned_schema_name() {
+    let schemas = SchemaService::new(MemorySchemas::default());
+    let name = schema_name("billing.invoice");
+    schemas
+        .publish(
+            SchemaKind::Artifact,
+            name.clone(),
+            ActorId::new(),
+            digest(1),
+            1_000,
+        )
+        .unwrap();
+
+    let result = schemas.publish(SchemaKind::Artifact, name, ActorId::new(), digest(2), 2_000);
+
+    assert!(matches!(
+        result,
+        Err(AuthorityError::SchemaNamespaceConflict(_))
+    ));
+}
+
+#[test]
+fn artifact_and_permission_policy_schemas_are_independent_namespaces() {
+    let schemas = SchemaService::new(MemorySchemas::default());
+    let name = schema_name("billing.invoice");
+    let artifact_owner = ActorId::new();
+    let policy_owner = ActorId::new();
+
+    let artifact = schemas
+        .publish(
+            SchemaKind::Artifact,
+            name.clone(),
+            artifact_owner,
+            digest(1),
+            1_000,
+        )
+        .unwrap();
+    let policy = schemas
+        .publish(
+            SchemaKind::PermissionPolicy,
+            name,
+            policy_owner,
+            digest(2),
+            1_000,
+        )
+        .unwrap();
+
+    assert_eq!(artifact.version().version(), 1);
+    assert_eq!(policy.version().version(), 1);
+    assert_ne!(artifact.version().owner(), policy.version().owner());
+}
+
+#[test]
+fn find_returns_none_for_an_unpublished_version() {
+    let schemas = SchemaService::new(MemorySchemas::default());
+    let name = schema_name("billing.invoice");
+    schemas
+        .publish(
+            SchemaKind::Artifact,
+            name.clone(),
+            ActorId::new(),
+            digest(1),
+            1_000,
+        )
+        .unwrap();
+
+    assert_eq!(schemas.find(SchemaKind::Artifact, &name, 2).unwrap(), None);
+}
+
+#[test]
+fn malformed_schema_names_are_rejected() {
+    assert_eq!(SchemaName::new(""), Err(AuthorityError::InvalidSchemaName));
+    assert_eq!(
+        SchemaName::new("invoice"),
+        Err(AuthorityError::InvalidSchemaName)
+    );
+    assert_eq!(
+        SchemaName::new("Billing.Invoice"),
+        Err(AuthorityError::InvalidSchemaName)
+    );
+}
+
+#[test]
+fn invalid_schema_version_facts_are_rejected() {
+    let owner = ActorId::new();
+    assert_eq!(
+        SchemaVersion::restore(
+            SchemaVersionId::new(),
+            SchemaKind::Artifact,
+            schema_name("billing.invoice"),
+            0,
+            owner,
+            digest(1),
+            None,
+            1_000,
+        ),
+        Err(AuthorityError::InvalidSchemaVersion)
+    );
+    assert_eq!(
+        SchemaVersion::restore(
+            SchemaVersionId::new(),
+            SchemaKind::Artifact,
+            schema_name("billing.invoice"),
+            1,
+            owner,
+            digest(1),
+            None,
+            -1,
+        ),
+        Err(AuthorityError::InvalidSchemaVersion)
     );
 }
