@@ -172,6 +172,14 @@ For every non-public request, the kernel MUST:
 Failure at any step rejects the request before governed state mutation. Health
 does not bypass these checks.
 
+Step 8 assembles a fact bundle (source, action, schema versions, scope/
+artifact identifiers, grants) and calls an external, stateless policy
+evaluator for a verdict; the kernel treats an unreachable or erroring
+evaluator as denial. See
+[ADR-0013](decisions/0013-external-stateless-policy-evaluator-for-authority.md)
+for the full design and why the evaluator holds no authorization data of its
+own.
+
 The implemented middleware accepts each `Host`, `Content-Type`,
 `Content-Digest`, `Infernal-Service-Id`, `Infernal-Instance-Id`,
 `Infernal-Request-Id`, `Signature-Input`, and `Signature` header exactly once.

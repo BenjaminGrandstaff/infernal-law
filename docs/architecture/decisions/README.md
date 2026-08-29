@@ -37,3 +37,4 @@ They preserve the context and tradeoffs behind a decision.
 | [ADR-0010: Use PostgreSQL as the only kernel state store](0010-use-postgresql-as-the-only-kernel-state-store.md) | Accepted | 2026-08-29 |
 | [ADR-0011: Move scheduling policy to an external scheduler service](0011-move-scheduling-policy-outside-the-kernel.md) | Accepted | 2026-08-29 |
 | [ADR-0012: Rust-first client SDK family over the signed REST contract](0012-rust-first-client-sdk-family-over-signed-rest.md) | Accepted | 2026-08-29 |
+| [ADR-0013: External stateless policy evaluator for kernel authority](0013-external-stateless-policy-evaluator-for-authority.md) | Accepted | 2026-08-29 |

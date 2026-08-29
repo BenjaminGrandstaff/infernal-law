@@ -53,6 +53,14 @@ kernel unless it is explicitly marked otherwise.
   health/capacity-relay, and claim state — a scheduler never receives that
   state from a worker directly or from any other event source. See
   [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md).
+- **Policy evaluator** — an ordinary, non-privileged service principal that
+  holds no authorization data of its own. The kernel sends it a fact bundle
+  (source, action, schema versions, scope/artifact identifiers, grants, and
+  destination when applicable) and it returns an allow/deny verdict plus the
+  policy bundle/version it evaluated. The kernel alone owns the grants,
+  schemas, and audit trail; an unreachable or erroring evaluator is denial,
+  never implicit allow. See
+  [ADR-0013](decisions/0013-external-stateless-policy-evaluator-for-authority.md).
 - **External user subject** — optional provenance asserted by an authenticated
   service; it is not a kernel principal or credential.
 - **Request** — the immutable, signed, durable communication envelope submitted
@@ -259,7 +267,20 @@ Invariants:
 - A service MUST NOT authorize itself merely because it owns the artifact or
   permission-policy schema.
 - The kernel MUST be the final enforcement point and MUST retain the exact
-  schema versions, grants, and security context used for its decision.
+  schema versions, grants, and security context used for its decision. The
+  kernel MAY delegate the allow/deny *algorithm* to an external, stateless
+  policy evaluator that stores no data of its own, provided the kernel alone
+  owns the grants, schemas, and facts the evaluator is given, and alone
+  records the verdict (see
+  [ADR-0013](decisions/0013-external-stateless-policy-evaluator-for-authority.md)).
+- An unreachable, erroring, or malformed-response policy evaluator MUST be
+  treated as denial, never as an implicit allow.
+- A recorded authority verdict MUST be pinned to the policy bundle/version
+  evaluated at that time; a later policy change MUST NOT retroactively alter
+  an earlier accepted request's or materialized route's authorization.
+- Request-acceptance authority and route authority are distinct decisions,
+  each independently pinned, using one shared evaluation contract with
+  different fact bundles rather than two separate integrations.
 
 Acceptance criteria:
 
@@ -279,8 +300,10 @@ Acceptance criteria:
 
 Implementation status:
 
-- Pending: generic request authority, service-owned artifact and permission
-  schema registration, administrative activation, grants, and decision audit.
+- Pending: kernel-owned grant and schema storage/administration, fact
+  assembly for both decision points, the policy-evaluator client call and its
+  fail-closed handling, decision-pinning audit records, and a reference
+  external policy evaluator implementation (ADR-0013).
 - The existing signature, replay, and communication-admission gate is the
   required precondition and MUST remain ahead of this authority step.
 
@@ -450,6 +473,9 @@ Invariants:
 - Every kernel decision MUST be a first-class durable record containing its
   type, outcome, responsible service or administrator, request ID, time,
   relevant security and schema revisions, and affected administrative objects.
+  An authority decision produced by an external policy evaluator additionally
+  records that evaluator's identity and the policy bundle/version it claimed
+  to evaluate (ADR-0013).
 - Reversal or supersession MUST create another decision linked to the earlier
   record.
 

@@ -54,6 +54,11 @@ work from process memory or a local filesystem.
   contract from ADR-0003 — see
   [ADR-0012](decisions/0012-rust-first-client-sdk-family-over-signed-rest.md)
   and the `infernal-client-*` repositories.
+- Authorization policy logic: the algorithm that turns facts into an
+  allow/deny verdict. The kernel owns identity, grants, schema
+  registration/activation, and audit; the verdict itself comes from an
+  external, stateless policy evaluator — see
+  [ADR-0013](decisions/0013-external-stateless-policy-evaluator-for-authority.md).
 - Capabilities beyond the documented [minimum viable kernel](minimum-viable-kernel.md)
   until they are separately specified
 
