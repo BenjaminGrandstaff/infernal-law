@@ -56,6 +56,9 @@ key-scoped nonce-digest reservations, and append-only replay outcome audit.
 Migration 0007 creates default-deny communication admission, automatic
 one-to-one records for every stable service identity, idempotent administrative
 changes, and append-only admission history.
+Migration 0008 creates append-only accepted requests scoped to
+`(source_service_id, request_id)`, a semantic fingerprint binding that rejects
+rebinding to different content, and append-only acceptance audit.
 Applied migration versions are recorded in `kernel_schema_migrations`.
 
 The `PostgresIdentityRepository` adapter implements the identity module's
@@ -91,6 +94,14 @@ signed request with the same ID and fingerprint is classified as a safe retry
 for ILK-012; a repeated nonce is rejected as wire replay, and the same request
 ID with different content is rejected as a conflict. Fresh, safe-retry, replay,
 and conflict outcomes are appended to protected audit history.
+
+Accepted requests are durable and append-only: PostgreSQL uniquely keys each
+request on `(source_service_id, request_id)`, retrying the same request under
+the same fingerprint returns the original record, and rebinding a request ID
+to a different action or fingerprint is rejected rather than overwritten.
+Triggers reject in-place mutation or deletion of accepted requests and their
+acceptance audit history. See
+[ADR-0009](decisions/0009-use-explicit-subscription-delivery-modes.md).
 
 Communication admission is separate from identity lifecycle, credentials,
 health, and subscriptions. The Rust kernel has a fixed read-only repository

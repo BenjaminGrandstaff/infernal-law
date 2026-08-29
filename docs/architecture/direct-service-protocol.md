@@ -366,6 +366,8 @@ delivery solely from these database records.
 - kernel challenge and successful-handshake records;
 - `communication_enabled` plus append-only admission history;
 - immutable nonce digests and service/request-ID fingerprint bindings;
+- accepted requests keyed on `(source_service_id, request_id)` with their
+  append-only acceptance audit;
 - subscriptions and durable delivery cursors;
 - latest health/capacity observation and observation time;
 - work claims and lease state; and

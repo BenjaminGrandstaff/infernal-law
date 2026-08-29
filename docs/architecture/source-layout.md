@@ -28,6 +28,8 @@ src/
 │                            # public keys, leases, revocation, audit
 │   ├── postgres_replay_protection_repository.rs
 │   │                        # atomic nonce/request-ID replay persistence
+│   ├── postgres_request_repository.rs
+│   │                        # ILK-003 durable acceptance and audit
 │   ├── postgres_handshake_repository.rs
 │   │                        # challenge consumption and handshake history
 │   ├── postgres_subscribed_instance_discovery.rs
@@ -100,6 +102,8 @@ tests/
 │                            # opt-in discovery/handshake persistence test
 ├── postgres_replay_protection.rs
 │                            # opt-in replay persistence/guard test
+├── postgres_request_repository.rs
+│                            # opt-in ILK-003 durability/history test
 ├── postgres_communication_admission.rs
 │                            # opt-in admission administration/history test
 ├── postgres_governed_http_middleware.rs
@@ -154,6 +158,7 @@ cargo test --test postgres_enrollment_bindings -- --ignored
 cargo test --test postgres_subscription_repository -- --ignored
 cargo test --test postgres_handshake_reconciler -- --ignored
 cargo test --test postgres_replay_protection -- --ignored
+cargo test --test postgres_request_repository -- --ignored
 cargo test --test postgres_communication_admission -- --ignored
 cargo test --test postgres_governed_http_middleware -- --ignored
 ```

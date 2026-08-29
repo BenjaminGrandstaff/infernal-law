@@ -334,9 +334,12 @@ Implementation status:
   no field mutation operations.
 - Partial foundation: the implemented replay layer permanently binds a source
   service and request ID to a semantic fingerprint.
-- Pending: PostgreSQL durability, authenticated-envelope construction, artifact
-  descriptor, schema references, correlation relationships, exclusive-group
-  and inclusive-destination route records and transition history, and
+- Complete: atomic PostgreSQL acceptance scoped to `(source_service_id,
+  request_id)`, safe-retry classification, conflict rejection on rebinding,
+  and append-only acceptance audit surviving process restart.
+- Pending: authenticated-envelope construction, artifact descriptor, schema
+  references, correlation relationships, exclusive-group and
+  inclusive-destination route records and transition history, and
   subscription-triggered backlog routing.
 
 ### ILK-004: Versions

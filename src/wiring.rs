@@ -13,6 +13,7 @@ use crate::infrastructure::postgres_handshake_repository::PostgresHandshakeRepos
 use crate::infrastructure::postgres_identity_repository::PostgresIdentityRepository;
 use crate::infrastructure::postgres_instance_registry::PostgresInstanceRegistry;
 use crate::infrastructure::postgres_replay_protection_repository::PostgresReplayProtectionRepository;
+use crate::infrastructure::postgres_request_repository::PostgresRequestRepository;
 use crate::infrastructure::postgres_subscribed_instance_discovery::PostgresSubscribedInstanceDiscovery;
 use crate::infrastructure::postgres_subscription_repository::PostgresSubscriptionRepository;
 use crate::kernel::admission::AdmissionService;
@@ -23,6 +24,7 @@ use crate::kernel::instance_keys::{InstanceCredential, InstancePublicKey, Instan
 use crate::kernel::instance_registry::{InstanceRegistryService, LeasePolicy};
 use crate::kernel::replay_protection::ReplayProtectionService;
 use crate::kernel::request_gate::ServiceRequestGate;
+use crate::kernel::requests::RequestService;
 use crate::kernel::service_requests::ServiceRequestVerifier;
 use crate::kernel::subscriptions::SubscriptionService;
 
@@ -37,6 +39,7 @@ pub struct Application {
     instance_registry: InstanceRegistryService<PostgresInstanceRegistry>,
     subscriptions: SubscriptionService<PostgresSubscriptionRepository>,
     replay_protection: ReplayProtectionService<PostgresReplayProtectionRepository>,
+    requests: RequestService<PostgresRequestRepository>,
 }
 
 impl Application {
@@ -61,6 +64,7 @@ impl Application {
             SubscriptionService::new(PostgresSubscriptionRepository::new(database.clone()));
         let replay_protection =
             ReplayProtectionService::new(PostgresReplayProtectionRepository::new(database.clone()));
+        let requests = RequestService::new(PostgresRequestRepository::new(database.clone()));
 
         Ok(Self {
             database,
@@ -70,6 +74,7 @@ impl Application {
             instance_registry,
             subscriptions,
             replay_protection,
+            requests,
         })
     }
 
@@ -125,6 +130,10 @@ impl Application {
         &self,
     ) -> &ReplayProtectionService<PostgresReplayProtectionRepository> {
         &self.replay_protection
+    }
+
+    pub const fn requests(&self) -> &RequestService<PostgresRequestRepository> {
+        &self.requests
     }
 
     pub fn handshake_reconciler<T>(

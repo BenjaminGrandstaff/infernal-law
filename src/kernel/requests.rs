@@ -105,6 +105,120 @@ pub struct Request {
     action: ActionName,
 }
 
+/// The digest of the complete semantic request envelope. It binds fields that
+/// will be added to the minimum core, including artifact and schema metadata,
+/// without making those fields mutable after acceptance.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RequestFingerprint([u8; 32]);
+
+impl RequestFingerprint {
+    pub const fn from_bytes(value: [u8; 32]) -> Self {
+        Self(value)
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcceptedRequest {
+    request: Request,
+    fingerprint: RequestFingerprint,
+    accepted_at: i64,
+}
+
+impl AcceptedRequest {
+    pub fn restore(
+        request: Request,
+        fingerprint: RequestFingerprint,
+        accepted_at: i64,
+    ) -> Result<Self, RequestError> {
+        if accepted_at < 0 {
+            return Err(RequestError::InvalidAcceptedAt);
+        }
+        Ok(Self {
+            request,
+            fingerprint,
+            accepted_at,
+        })
+    }
+
+    pub const fn request(&self) -> &Request {
+        &self.request
+    }
+
+    pub const fn fingerprint(&self) -> RequestFingerprint {
+        self.fingerprint
+    }
+
+    pub const fn accepted_at(&self) -> i64 {
+        self.accepted_at
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RequestAcceptance {
+    Accepted(AcceptedRequest),
+    SafeRetry(AcceptedRequest),
+}
+
+impl RequestAcceptance {
+    pub const fn record(&self) -> &AcceptedRequest {
+        match self {
+            Self::Accepted(record) | Self::SafeRetry(record) => record,
+        }
+    }
+
+    pub const fn is_fresh(&self) -> bool {
+        matches!(self, Self::Accepted(_))
+    }
+}
+
+pub trait RequestRepository: Send + Sync {
+    fn accept(
+        &self,
+        request: Request,
+        fingerprint: RequestFingerprint,
+    ) -> Result<RequestAcceptance, RequestError>;
+
+    fn find(
+        &self,
+        source_service: ActorId,
+        request_id: RequestId,
+    ) -> Result<Option<AcceptedRequest>, RequestError>;
+}
+
+#[derive(Clone)]
+pub struct RequestService<R> {
+    repository: R,
+}
+
+impl<R> RequestService<R>
+where
+    R: RequestRepository,
+{
+    pub const fn new(repository: R) -> Self {
+        Self { repository }
+    }
+
+    pub fn accept(
+        &self,
+        request: Request,
+        fingerprint: RequestFingerprint,
+    ) -> Result<RequestAcceptance, RequestError> {
+        self.repository.accept(request, fingerprint)
+    }
+
+    pub fn find(
+        &self,
+        source_service: ActorId,
+        request_id: RequestId,
+    ) -> Result<Option<AcceptedRequest>, RequestError> {
+        self.repository.find(source_service, request_id)
+    }
+}
+
 impl Request {
     pub fn create(source_service: ActorId, action: &str) -> Result<Self, RequestError> {
         Self::restore(RequestId::new(), source_service, action)
@@ -160,20 +274,34 @@ fn is_valid_action_segment(segment: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-".contains(&byte))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RequestError {
     InvalidRequestId,
     InvalidActionName,
+    InvalidAcceptedAt,
+    RequestIdConflict(RequestId),
+    Repository(String),
+    UnknownSource(ActorId),
 }
 
 impl Display for RequestError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::InvalidRequestId => "request ID must be a UUID",
-            Self::InvalidActionName => {
-                "action must be a canonical dotted lower-case name within the length limit"
+        match self {
+            Self::InvalidRequestId => formatter.write_str("request ID must be a UUID"),
+            Self::InvalidActionName => formatter.write_str(
+                "action must be a canonical dotted lower-case name within the length limit",
+            ),
+            Self::InvalidAcceptedAt => {
+                formatter.write_str("request acceptance timestamp is invalid")
             }
-        })
+            Self::RequestIdConflict(id) => {
+                write!(formatter, "request ID {id} is bound to different content")
+            }
+            Self::Repository(message) => write!(formatter, "request repository failed: {message}"),
+            Self::UnknownSource(id) => {
+                write!(formatter, "source service identity {id} was not found")
+            }
+        }
     }
 }
 
