@@ -340,11 +340,21 @@ Implementation status:
   implements the recorder with a plain append-only insert into
   `authority_decisions` — kernel bookkeeping, not administration, so there is
   no out-of-band function gating it, unlike grants and schema status.
-- Pending: integrating schema version references into `PolicyFacts`/`Grant`
-  (deferred when the pure fact/grant contract was first built), an
-  authenticated network `PolicyEvaluator` implementation and the outbound
-  signed-call machinery it needs, a reference external policy evaluator
-  service, and wiring this stage into `ServiceRequestGate` (ADR-0013).
+- Complete: schema version references are mandatory on `PolicyFacts` and
+  `Grant`, not optional. `SchemaVersionRefs` bundles one artifact schema
+  version and one permission-policy schema version; `Grant::permits` requires
+  an exact match on both, so reactivating, retiring, or superseding a schema
+  version never silently extends or breaks a grant pinned to a specific
+  version. PostgreSQL enforces the same requirement structurally: both
+  `authority_grants` and `authority_decisions` carry mandatory,
+  foreign-key-checked columns for both schema versions, and
+  `create_authority_grant` additionally checks that each referenced version
+  is the expected kind (artifact vs. permission-policy) before accepting a
+  grant.
+- Pending: an authenticated network `PolicyEvaluator` implementation and the
+  outbound signed-call machinery it needs, a reference external policy
+  evaluator service, and wiring this stage into `ServiceRequestGate`
+  (ADR-0013).
 - The existing signature, replay, and communication-admission gate is the
   required precondition and MUST remain ahead of this authority step.
 

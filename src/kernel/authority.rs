@@ -109,6 +109,34 @@ impl PolicyBundleVersion {
     }
 }
 
+/// The two schema versions ILK-002 requires for every authority decision:
+/// the artifact's own schema, and the permission-policy schema describing
+/// what actions/fields are meaningful for it. Both are mandatory on every
+/// [`PolicyFacts`] and every [`Grant`] — there is no partial state where a
+/// grant applies without a specific version of each pinned down.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SchemaVersionRefs {
+    artifact: SchemaVersionId,
+    permission_policy: SchemaVersionId,
+}
+
+impl SchemaVersionRefs {
+    pub const fn new(artifact: SchemaVersionId, permission_policy: SchemaVersionId) -> Self {
+        Self {
+            artifact,
+            permission_policy,
+        }
+    }
+
+    pub const fn artifact(&self) -> SchemaVersionId {
+        self.artifact
+    }
+
+    pub const fn permission_policy(&self) -> SchemaVersionId {
+        self.permission_policy
+    }
+}
+
 /// The fact bundle for one of the two ILK-002 decision points. Request-
 /// acceptance authority has no destination; route authority does. Both
 /// share this one type and [`AuthorityService::authorize`] rather than two
@@ -118,15 +146,22 @@ pub struct PolicyFacts {
     source: ActorId,
     action: ActionName,
     scope: Scope,
+    schema_versions: SchemaVersionRefs,
     destination: Option<ActorId>,
 }
 
 impl PolicyFacts {
-    pub const fn for_request_acceptance(source: ActorId, action: ActionName, scope: Scope) -> Self {
+    pub const fn for_request_acceptance(
+        source: ActorId,
+        action: ActionName,
+        scope: Scope,
+        schema_versions: SchemaVersionRefs,
+    ) -> Self {
         Self {
             source,
             action,
             scope,
+            schema_versions,
             destination: None,
         }
     }
@@ -135,12 +170,14 @@ impl PolicyFacts {
         source: ActorId,
         action: ActionName,
         scope: Scope,
+        schema_versions: SchemaVersionRefs,
         destination: ActorId,
     ) -> Self {
         Self {
             source,
             action,
             scope,
+            schema_versions,
             destination: Some(destination),
         }
     }
@@ -157,6 +194,10 @@ impl PolicyFacts {
         &self.scope
     }
 
+    pub const fn schema_versions(&self) -> SchemaVersionRefs {
+        self.schema_versions
+    }
+
     pub const fn destination(&self) -> Option<ActorId> {
         self.destination
     }
@@ -169,22 +210,29 @@ impl PolicyFacts {
 /// An administrator-controlled grant. `destination` distinguishes a
 /// request-acceptance grant (`None`) from a route-authority grant scoped to
 /// one destination (`Some`); the two decision points never share a grant.
+/// `schema_versions` pins the grant to one exact artifact and
+/// permission-policy schema version — a grant never applies "for any
+/// version," matching ILK-002's requirement that acceptance criteria
+/// reference the exact schema version in effect.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Grant {
     id: GrantId,
     source: ActorId,
     action: ActionName,
     scope: Scope,
+    schema_versions: SchemaVersionRefs,
     destination: Option<ActorId>,
     valid_from: i64,
     valid_until: Option<i64>,
 }
 
 impl Grant {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         source: ActorId,
         action: ActionName,
         scope: Scope,
+        schema_versions: SchemaVersionRefs,
         destination: Option<ActorId>,
         valid_from: i64,
         valid_until: Option<i64>,
@@ -194,6 +242,7 @@ impl Grant {
             source,
             action,
             scope,
+            schema_versions,
             destination,
             valid_from,
             valid_until,
@@ -202,11 +251,13 @@ impl Grant {
 
     /// Reconstructs a grant with its already-assigned, durably stored ID.
     /// Used by repository adapters; new grants should use [`Grant::new`].
+    #[allow(clippy::too_many_arguments)]
     pub fn restore(
         id: GrantId,
         source: ActorId,
         action: ActionName,
         scope: Scope,
+        schema_versions: SchemaVersionRefs,
         destination: Option<ActorId>,
         valid_from: i64,
         valid_until: Option<i64>,
@@ -219,6 +270,7 @@ impl Grant {
             source,
             action,
             scope,
+            schema_versions,
             destination,
             valid_from,
             valid_until,
@@ -232,11 +284,14 @@ impl Grant {
     /// Whether this grant is currently in force and matches the given facts.
     /// Request-acceptance facts (no destination) only match non-destination
     /// grants; route facts only match grants scoped to that exact
-    /// destination.
+    /// destination. The grant's schema versions must match exactly, not
+    /// merely be currently active — reactivating or superseding a schema
+    /// version never silently extends a grant pinned to a different one.
     pub fn permits(&self, facts: &PolicyFacts, now: i64) -> bool {
         self.source == facts.source
             && self.action == facts.action
             && self.scope.matches(&facts.scope)
+            && self.schema_versions == facts.schema_versions
             && self.destination == facts.destination
             && self.valid_from <= now
             && self.valid_until.is_none_or(|until| now < until)

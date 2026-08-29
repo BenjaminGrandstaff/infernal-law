@@ -14,7 +14,7 @@ use infernal_law::infrastructure::postgres_authority_repository::PostgresAuthori
 use infernal_law::kernel::authority::{
     AuthorityError, AuthorityRepository, AuthorityService, ContentDigest, Grant,
     PolicyBundleVersion, PolicyEvaluation, PolicyEvaluator, PolicyFacts, SchemaKind, SchemaName,
-    SchemaRepository, SchemaStatus, Scope, Verdict,
+    SchemaRepository, SchemaStatus, SchemaVersionRefs, Scope, Verdict,
 };
 use infernal_law::kernel::identity::ActorKind;
 use infernal_law::kernel::requests::ActionName;
@@ -58,6 +58,28 @@ fn authority_grants_are_administered_out_of_band_and_read_by_matching_facts() {
         )
         .unwrap();
     let repository = PostgresAuthorityRepository::new(application.database().clone());
+    let artifact_schema = repository
+        .publish(
+            SchemaKind::Artifact,
+            SchemaName::new("billing.invoice").unwrap(),
+            source.id(),
+            ContentDigest::from_bytes([9; 32]),
+            1,
+        )
+        .unwrap();
+    let permission_policy_schema = repository
+        .publish(
+            SchemaKind::PermissionPolicy,
+            SchemaName::new("billing.invoice").unwrap(),
+            source.id(),
+            ContentDigest::from_bytes([10; 32]),
+            1,
+        )
+        .unwrap();
+    let schema_versions = SchemaVersionRefs::new(
+        artifact_schema.version().id(),
+        permission_policy_schema.version().id(),
+    );
 
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be present");
     let mut administrator =
@@ -71,6 +93,8 @@ fn authority_grants_are_administered_out_of_band_and_read_by_matching_facts() {
         source.id().to_string(),
         "billing.invoice.submit",
         "*",
+        schema_versions.artifact().to_string(),
+        schema_versions.permission_policy().to_string(),
         None,
         0,
         None,
@@ -82,6 +106,7 @@ fn authority_grants_are_administered_out_of_band_and_read_by_matching_facts() {
         source.id(),
         action("billing.invoice.submit"),
         scope("invoice-42"),
+        schema_versions,
     );
     let grants = repository.matching_grants(&facts, 1_000).unwrap();
     assert_eq!(grants.len(), 1);
@@ -91,6 +116,7 @@ fn authority_grants_are_administered_out_of_band_and_read_by_matching_facts() {
         source.id(),
         action("billing.invoice.submit"),
         scope("invoice-42"),
+        schema_versions,
         destination.id(),
     );
     assert!(
@@ -107,6 +133,8 @@ fn authority_grants_are_administered_out_of_band_and_read_by_matching_facts() {
         source.id().to_string(),
         "billing.invoice.submit",
         "*",
+        schema_versions.artifact().to_string(),
+        schema_versions.permission_policy().to_string(),
         None,
         0,
         None,
@@ -121,12 +149,14 @@ fn authority_grants_are_administered_out_of_band_and_read_by_matching_facts() {
 
     let conflicting = administrator.query_opt(
         "SELECT * FROM create_authority_grant($1::text::uuid, $2::text::uuid, $3, $4, \
-         NULL::uuid, $5, NULL::bigint, $6, $7, $8::text::uuid, $9)",
+         $5::text::uuid, $6::text::uuid, NULL::uuid, $7, NULL::bigint, $8, $9, $10::text::uuid, $11)",
         &[
             &grant_id.to_string(),
             &source.id().to_string(),
             &"billing.invoice.cancel",
             &"*",
+            &schema_versions.artifact().to_string(),
+            &schema_versions.permission_policy().to_string(),
             &0i64,
             &"test-administrator",
             &"reason",
@@ -141,12 +171,14 @@ fn authority_grants_are_administered_out_of_band_and_read_by_matching_facts() {
 
     let duplicate_grant_id = administrator.query_opt(
         "SELECT * FROM create_authority_grant($1::text::uuid, $2::text::uuid, $3, $4, \
-         NULL::uuid, $5, NULL::bigint, $6, $7, $8::text::uuid, $9)",
+         $5::text::uuid, $6::text::uuid, NULL::uuid, $7, NULL::bigint, $8, $9, $10::text::uuid, $11)",
         &[
             &grant_id.to_string(),
             &source.id().to_string(),
             &"work.item.submit",
             &"*",
+            &schema_versions.artifact().to_string(),
+            &schema_versions.permission_policy().to_string(),
             &0i64,
             &"test-administrator",
             &"reason",
@@ -166,14 +198,20 @@ fn authority_grants_are_administered_out_of_band_and_read_by_matching_facts() {
         source.id().to_string(),
         "work.item.submit",
         "*",
+        schema_versions.artifact().to_string(),
+        schema_versions.permission_policy().to_string(),
         None,
         0,
         Some(500),
         Uuid::new_v4(),
         1_000,
     );
-    let expired_facts =
-        PolicyFacts::for_request_acceptance(source.id(), action("work.item.submit"), scope("*"));
+    let expired_facts = PolicyFacts::for_request_acceptance(
+        source.id(),
+        action("work.item.submit"),
+        scope("*"),
+        schema_versions,
+    );
     assert!(
         repository
             .matching_grants(&expired_facts, 1_000)
@@ -209,6 +247,8 @@ fn create_grant(
     source_service_id: String,
     action: &str,
     scope: &str,
+    artifact_schema_version_id: String,
+    permission_policy_schema_version_id: String,
     destination_service_id: Option<String>,
     valid_from: i64,
     valid_until: Option<i64>,
@@ -218,12 +258,14 @@ fn create_grant(
     client
         .query_one(
             "SELECT * FROM create_authority_grant($1::text::uuid, $2::text::uuid, $3, $4, \
-             $5::text::uuid, $6, $7, $8, $9, $10::text::uuid, $11)",
+             $5::text::uuid, $6::text::uuid, $7::text::uuid, $8, $9, $10, $11, $12::text::uuid, $13)",
             &[
                 &grant_id.to_string(),
                 &source_service_id,
                 &action,
                 &scope,
+                &artifact_schema_version_id,
+                &permission_policy_schema_version_id,
                 &destination_service_id,
                 &valid_from,
                 &valid_until,
@@ -406,6 +448,28 @@ fn authorize_durably_records_every_decision_and_history_is_append_only() {
         )
         .unwrap();
     let repository = PostgresAuthorityRepository::new(application.database().clone());
+    let artifact_schema = repository
+        .publish(
+            SchemaKind::Artifact,
+            SchemaName::new("billing.invoice").unwrap(),
+            source.id(),
+            ContentDigest::from_bytes([11; 32]),
+            1,
+        )
+        .unwrap();
+    let permission_policy_schema = repository
+        .publish(
+            SchemaKind::PermissionPolicy,
+            SchemaName::new("billing.invoice").unwrap(),
+            source.id(),
+            ContentDigest::from_bytes([12; 32]),
+            1,
+        )
+        .unwrap();
+    let schema_versions = SchemaVersionRefs::new(
+        artifact_schema.version().id(),
+        permission_policy_schema.version().id(),
+    );
     let service = AuthorityService::new(
         repository.clone(),
         AllowIfAnyGrant,
@@ -417,6 +481,7 @@ fn authorize_durably_records_every_decision_and_history_is_append_only() {
         source.id(),
         action("billing.invoice.submit"),
         scope("*"),
+        schema_versions,
     );
     let decision = service.authorize(facts, 1_000).unwrap();
     assert!(

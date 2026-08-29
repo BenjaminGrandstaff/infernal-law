@@ -6,10 +6,11 @@ use infernal_law::kernel::authority::{
     AuthorityDecision, AuthorityDecisionRecorder, AuthorityError, AuthorityRepository,
     AuthorityService, ContentDigest, Grant, PolicyBundleVersion, PolicyEvaluation, PolicyEvaluator,
     PolicyFacts, SchemaKind, SchemaName, SchemaRecord, SchemaRepository, SchemaService,
-    SchemaStatus, SchemaVersion, SchemaVersionId, Scope, Verdict,
+    SchemaStatus, SchemaVersion, SchemaVersionId, SchemaVersionRefs, Scope, Verdict,
 };
 use infernal_law::kernel::identity::ActorId;
 use infernal_law::kernel::requests::ActionName;
+use uuid::Uuid;
 
 #[derive(Clone, Default)]
 struct MemoryGrants(Arc<Mutex<Vec<Grant>>>);
@@ -153,6 +154,25 @@ fn digest(byte: u8) -> ContentDigest {
     ContentDigest::from_bytes([byte; 32])
 }
 
+/// A fixed, deterministic schema-version pair, so unrelated tests can build
+/// matching facts and grants without threading a shared value through every
+/// call site.
+fn schema_versions() -> SchemaVersionRefs {
+    SchemaVersionRefs::new(
+        SchemaVersionId::from_uuid(Uuid::from_bytes([1; 16])),
+        SchemaVersionId::from_uuid(Uuid::from_bytes([2; 16])),
+    )
+}
+
+/// A different fixed pair from [`schema_versions`], for tests proving a
+/// grant pinned to one schema version does not match facts citing another.
+fn other_schema_versions() -> SchemaVersionRefs {
+    SchemaVersionRefs::new(
+        SchemaVersionId::from_uuid(Uuid::from_bytes([3; 16])),
+        SchemaVersionId::from_uuid(Uuid::from_bytes([4; 16])),
+    )
+}
+
 #[test]
 fn default_deny_when_no_grant_matches() {
     let service = AuthorityService::new(
@@ -165,6 +185,7 @@ fn default_deny_when_no_grant_matches() {
         ActorId::new(),
         action("billing.invoice.submit"),
         scope("*"),
+        schema_versions(),
     );
 
     let decision = service.authorize(facts, 1_000).unwrap();
@@ -183,6 +204,7 @@ fn matching_grant_allows_and_pins_the_evaluated_policy_bundle_version() {
             source,
             action("billing.invoice.submit"),
             Scope::wildcard(),
+            schema_versions(),
             None,
             0,
             None,
@@ -199,6 +221,7 @@ fn matching_grant_allows_and_pins_the_evaluated_policy_bundle_version() {
         source,
         action("billing.invoice.submit"),
         scope("invoice-42"),
+        schema_versions(),
     );
 
     let decision = service.authorize(facts, 1_000).unwrap();
@@ -222,6 +245,7 @@ fn unreachable_evaluator_is_denied_never_implicitly_allowed() {
             source,
             action("billing.invoice.submit"),
             Scope::wildcard(),
+            schema_versions(),
             None,
             0,
             None,
@@ -238,6 +262,7 @@ fn unreachable_evaluator_is_denied_never_implicitly_allowed() {
         source,
         action("billing.invoice.submit"),
         scope("invoice-42"),
+        schema_versions(),
     );
 
     let decision = service.authorize(facts, 1_000).unwrap();
@@ -255,6 +280,7 @@ fn expired_grant_does_not_permit() {
             source,
             action("billing.invoice.submit"),
             Scope::wildcard(),
+            schema_versions(),
             None,
             0,
             Some(500),
@@ -271,6 +297,7 @@ fn expired_grant_does_not_permit() {
         source,
         action("billing.invoice.submit"),
         scope("invoice-42"),
+        schema_versions(),
     );
 
     let decision = service.authorize(facts, 1_000).unwrap();
@@ -288,6 +315,7 @@ fn request_acceptance_and_route_decisions_do_not_share_grants() {
             source,
             action("work.item.submit"),
             Scope::wildcard(),
+            schema_versions(),
             Some(destination),
             0,
             None,
@@ -301,18 +329,64 @@ fn request_acceptance_and_route_decisions_do_not_share_grants() {
         MemoryDecisions::default(),
     );
 
-    let acceptance_facts =
-        PolicyFacts::for_request_acceptance(source, action("work.item.submit"), scope("*"));
+    let acceptance_facts = PolicyFacts::for_request_acceptance(
+        source,
+        action("work.item.submit"),
+        scope("*"),
+        schema_versions(),
+    );
     let acceptance_decision = service.authorize(acceptance_facts, 1_000).unwrap();
     assert!(
         !acceptance_decision.is_allowed(),
         "a route-scoped grant must not authorize request acceptance"
     );
 
-    let route_facts =
-        PolicyFacts::for_route(source, action("work.item.submit"), scope("*"), destination);
+    let route_facts = PolicyFacts::for_route(
+        source,
+        action("work.item.submit"),
+        scope("*"),
+        schema_versions(),
+        destination,
+    );
     let route_decision = service.authorize(route_facts, 1_000).unwrap();
     assert!(route_decision.is_allowed());
+}
+
+#[test]
+fn a_grant_never_matches_facts_citing_a_different_schema_version() {
+    let repository = MemoryGrants::default();
+    let source = ActorId::new();
+    repository.insert(
+        Grant::new(
+            source,
+            action("billing.invoice.submit"),
+            Scope::wildcard(),
+            schema_versions(),
+            None,
+            0,
+            None,
+        )
+        .unwrap(),
+    );
+    let service = AuthorityService::new(
+        repository,
+        AllowIfAnyGrant,
+        ActorId::new(),
+        MemoryDecisions::default(),
+    );
+    let facts = PolicyFacts::for_request_acceptance(
+        source,
+        action("billing.invoice.submit"),
+        scope("*"),
+        other_schema_versions(),
+    );
+
+    let decision = service.authorize(facts, 1_000).unwrap();
+
+    assert!(
+        !decision.is_allowed(),
+        "a grant pinned to one schema version must not authorize facts citing another"
+    );
 }
 
 #[test]
@@ -324,6 +398,7 @@ fn wildcard_scope_grant_matches_any_requested_scope() {
             source,
             action("billing.invoice.submit"),
             Scope::wildcard(),
+            schema_versions(),
             None,
             0,
             None,
@@ -340,6 +415,7 @@ fn wildcard_scope_grant_matches_any_requested_scope() {
         source,
         action("billing.invoice.submit"),
         scope("any-invoice-id"),
+        schema_versions(),
     );
 
     let decision = service.authorize(facts, 1_000).unwrap();
@@ -365,6 +441,7 @@ fn invalid_grant_validity_window_is_rejected() {
             source,
             action("billing.invoice.submit"),
             Scope::wildcard(),
+            schema_versions(),
             None,
             100,
             Some(100),
@@ -376,6 +453,7 @@ fn invalid_grant_validity_window_is_rejected() {
             source,
             action("billing.invoice.submit"),
             Scope::wildcard(),
+            schema_versions(),
             None,
             -1,
             None,
@@ -552,6 +630,7 @@ fn every_authorize_call_durably_records_exactly_one_decision() {
         ActorId::new(),
         action("billing.invoice.submit"),
         scope("*"),
+        schema_versions(),
     );
 
     let returned = service.authorize(facts, 1_000).unwrap();
@@ -584,6 +663,7 @@ fn authorize_fails_rather_than_return_an_unrecorded_decision() {
         ActorId::new(),
         action("billing.invoice.submit"),
         scope("*"),
+        schema_versions(),
     );
 
     assert!(service.authorize(facts, 1_000).is_err());

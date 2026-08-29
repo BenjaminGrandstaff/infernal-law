@@ -77,6 +77,16 @@ evaluator could not be reached) before the decision is ever returned to a
 caller. This is ordinary kernel bookkeeping written directly by the kernel
 role, not administration, so unlike grants and schema status there is no
 out-of-band function gating it.
+Migrations 0012 and 0013 make an artifact schema version and a
+permission-policy schema version mandatory, foreign-key-checked fields on
+every authority grant and every authority decision respectively — a grant or
+a decision citing no schema version, or the wrong kind of schema version in
+either slot, is now a database-level impossibility rather than merely a
+convention. `create_authority_grant`'s signature and its idempotent
+correlation-ID conflict check both grew to cover the two new fields; the
+already-strict foreign keys mean these migrations only apply cleanly to a
+database with no pre-existing rows in these tables, which matches this
+project's stage.
 Applied migration versions are recorded in `kernel_schema_migrations`.
 
 The `PostgresIdentityRepository` adapter implements the identity module's
