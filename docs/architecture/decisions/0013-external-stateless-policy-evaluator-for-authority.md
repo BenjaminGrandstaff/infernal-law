@@ -70,12 +70,16 @@ Five points settle the design:
 
 The policy evaluator is an ordinary service principal: it enrolls, holds
 keys, and signs exactly like every other service under
-[ADR-0003](0003-direct-signed-service-rest.md)/ILK-001. The kernel calls it
-the same way it already makes outbound authenticated calls during handshake
-reconciliation (ADR-0005) — as the signing party, verifying the response
-against the evaluator's registered key. No bespoke trust mechanism is
-introduced for this security-critical path; it reuses machinery the kernel
-already has.
+[ADR-0003](0003-direct-signed-service-rest.md)/ILK-001. The kernel verifies
+the evaluator's response against its registered key exactly as it already
+verifies any inbound request. The kernel calls the evaluator the same way it
+already makes outbound authenticated calls during handshake reconciliation
+(ADR-0005) — as the signing party — with one addition beyond what ADR-0005
+left open: the evaluator establishes trust in the kernel's current signing
+key by fetching [`GET /v1/kernel-identity`](0014-publish-kernel-identity-endpoint.md)
+(ADR-0014), rather than relying on undefined static configuration. No other
+new trust mechanism is introduced for this security-critical path; it reuses
+machinery the kernel already has.
 
 ### 2. Fail-closed
 

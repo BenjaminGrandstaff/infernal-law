@@ -351,10 +351,16 @@ Implementation status:
   `create_authority_grant` additionally checks that each referenced version
   is the expected kind (artifact vs. permission-policy) before accepting a
   grant.
+- Complete: the `GET /v1/kernel-identity` route publishing this process's
+  current public signing key, unauthenticated by design, so a future caller
+  (the policy evaluator, or the handshake reconciler's outbound transport)
+  can verify a kernel-signed message without static configuration that
+  breaks on every kernel restart (ADR-0014). Correct behavior behind multiple
+  kernel replicas remains a documented follow-up.
 - Pending: an authenticated network `PolicyEvaluator` implementation and the
-  outbound signed-call machinery it needs, a reference external policy
-  evaluator service, and wiring this stage into `ServiceRequestGate`
-  (ADR-0013).
+  outbound signed-call machinery it needs (which can now build on
+  `GET /v1/kernel-identity`), a reference external policy evaluator service,
+  and wiring this stage into `ServiceRequestGate` (ADR-0013).
 - The existing signature, replay, and communication-admission gate is the
   required precondition and MUST remain ahead of this authority step.
 

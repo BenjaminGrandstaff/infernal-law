@@ -7,11 +7,15 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
 use crate::infrastructure::kubernetes_token_reviewer::KubernetesTokenReviewer;
 use crate::kernel::enrollment::{
     EnrollmentBindingRepository, EnrollmentError, EnrollmentRequest, EnrollmentService,
     WorkloadTokenReviewer,
 };
+use crate::kernel::instance_keys::InstancePublicKey;
 use crate::kernel::instance_registry::{InstanceRegistryRepository, RegisteredInstance};
 use crate::kernel::request_gate::{
     AdmittedServiceRequest, ServiceRequestGate, ServiceRequestGateError,
@@ -222,9 +226,45 @@ fn dispatch(request: ParsedRequest, application: &Application) -> Response {
     }
 
     if request.path == "/health/ready" {
-        readiness_response(application.database().check_connection().is_ok())
-    } else {
-        route(&request.path)
+        return readiness_response(application.database().check_connection().is_ok());
+    }
+
+    if request.path == "/v1/kernel-identity" {
+        if request.method != "GET" {
+            return text_response("405 Method Not Allowed", "method not allowed\n");
+        }
+        return json_response(
+            "200 OK",
+            &KernelIdentityResponse::from(application.instance_public_key()),
+        );
+    }
+
+    route(&request.path)
+}
+
+/// Deliberately unauthenticated (ADR-0014): a public key is not confidential,
+/// and a caller cannot authenticate to the kernel via a mechanism that
+/// itself depends on already knowing the kernel's key. Publishes only this
+/// process's own signing material — never another service's keys or any
+/// administrative state.
+#[derive(serde::Serialize)]
+struct KernelIdentityResponse {
+    algorithm: &'static str,
+    instance_id: String,
+    key_id: String,
+    public_key: String,
+    fingerprint: String,
+}
+
+impl From<&InstancePublicKey> for KernelIdentityResponse {
+    fn from(key: &InstancePublicKey) -> Self {
+        Self {
+            algorithm: key.algorithm(),
+            instance_id: key.instance_id().to_string(),
+            key_id: key.key_id().to_string(),
+            public_key: URL_SAFE_NO_PAD.encode(key.public_key_bytes()),
+            fingerprint: URL_SAFE_NO_PAD.encode(key.fingerprint()),
+        }
     }
 }
 
@@ -657,14 +697,42 @@ fn unix_time() -> i64 {
 mod tests {
     use std::io::Cursor;
 
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
     use super::{
-        MAX_ENROLLMENT_BODY_BYTES, RequestReadError, read_request, readiness_response, route,
+        KernelIdentityResponse, MAX_ENROLLMENT_BODY_BYTES, RequestReadError, read_request,
+        readiness_response, route,
     };
+    use crate::kernel::identity::ActorId;
+    use crate::kernel::instance_keys::InstanceCredential;
 
     #[test]
     fn health_endpoints_are_available() {
         assert_eq!(route("/health/live").status, "200 OK");
         assert_eq!(readiness_response(true).status, "200 OK");
+    }
+
+    #[test]
+    fn kernel_identity_response_publishes_only_this_processs_public_signing_material() {
+        let credential = InstanceCredential::generate(ActorId::new());
+        let public_key = credential.public_key();
+
+        let response = KernelIdentityResponse::from(public_key);
+
+        assert_eq!(response.algorithm, "ed25519");
+        assert_eq!(response.instance_id, public_key.instance_id().to_string());
+        assert_eq!(response.key_id, public_key.key_id().to_string());
+        assert_eq!(
+            response.public_key,
+            URL_SAFE_NO_PAD.encode(public_key.public_key_bytes())
+        );
+        assert_eq!(
+            response.fingerprint,
+            URL_SAFE_NO_PAD.encode(public_key.fingerprint())
+        );
+        let serialized = serde_json::to_string(&response).unwrap();
+        assert!(!serialized.contains("signing_key"));
     }
 
     #[test]

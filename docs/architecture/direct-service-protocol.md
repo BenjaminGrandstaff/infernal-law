@@ -193,8 +193,14 @@ uses a sanitized `503`.
 Known subscription paths are wired through this boundary, but currently return
 `501` after successful admission because ILK-002 Authority and the governed
 handlers are not implemented. This preserves fail-closed behavior while making
-the transport boundary executable and testable. Public health and initial
-enrollment routes remain outside governed-request authentication by design.
+the transport boundary executable and testable. Public health, initial
+enrollment, and the kernel-identity routes remain outside governed-request
+authentication by design. The kernel-identity route
+(`GET /v1/kernel-identity`) publishes this process's current public signing
+key so a caller can verify a kernel-signed message (see
+[ADR-0014](decisions/0014-publish-kernel-identity-endpoint.md)); publishing a
+public key requires no authentication, since the key itself carries no
+confidentiality requirement.
 
 ## No SQL command surface
 

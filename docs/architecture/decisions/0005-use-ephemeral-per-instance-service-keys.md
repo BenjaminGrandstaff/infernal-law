@@ -6,6 +6,7 @@
 - Supersedes: [ADR-0004](0004-provision-service-keys-with-kubernetes-secrets.md)
 - Complements: [ADR-0003](0003-direct-signed-service-rest.md)
 - Registry placement superseded by: [ADR-0006](0006-store-instance-public-keys-in-postgresql.md)
+- Kernel trust anchor mechanism defined by: [ADR-0014](0014-publish-kernel-identity-endpoint.md)
 - Related: ILK-001, ILK-008, ILK-010, ILK-012, ILK-013
 
 ## Context

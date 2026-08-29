@@ -29,6 +29,9 @@ It listens on `0.0.0.0:8080` by default and provides:
 - `GET /`
 - `GET /health/live`
 - `GET /health/ready`
+- `GET /v1/kernel-identity` — this process's current public signing key,
+  deliberately unauthenticated (see
+  [ADR-0014](docs/architecture/decisions/0014-publish-kernel-identity-endpoint.md))
 
 Set `BIND_ADDRESS` or `PORT` to change the listener configuration. Startup
 fails if `DATABASE_URL` or `INFERNAL_LAW_SERVICE_ID` is absent, the service ID
