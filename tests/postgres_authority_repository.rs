@@ -1,12 +1,18 @@
 //! Goal: prove authority grants are administered only through the
 //! out-of-band, idempotent, conflict-detecting database function, are
 //! immutable and append-only, and that `PostgresAuthorityRepository` reads
-//! exactly the grants matching a given fact bundle's decision point.
+//! exactly the grants matching a given fact bundle's decision point. Also
+//! proves schema versions are published atomically and versioned by
+//! `PostgresAuthorityRepository` itself, while status administration stays
+//! out-of-band and idempotent, exactly like grant creation.
 
 use std::env;
 
 use infernal_law::infrastructure::postgres_authority_repository::PostgresAuthorityRepository;
-use infernal_law::kernel::authority::{AuthorityRepository, PolicyFacts, Scope};
+use infernal_law::kernel::authority::{
+    AuthorityRepository, ContentDigest, PolicyFacts, SchemaKind, SchemaName, SchemaRepository,
+    SchemaStatus, Scope,
+};
 use infernal_law::kernel::identity::ActorKind;
 use infernal_law::kernel::requests::ActionName;
 use infernal_law::wiring::Application;
@@ -213,4 +219,172 @@ fn action(value: &str) -> ActionName {
 
 fn scope(value: &str) -> Scope {
     Scope::new(value).unwrap()
+}
+
+#[test]
+#[ignore = "requires DATABASE_URL, INFERNAL_LAW_SERVICE_ID, and PostgreSQL with pgvector"]
+fn schema_versions_are_published_by_the_repository_and_administered_out_of_band() {
+    let application = Application::from_env().expect("application should connect and migrate");
+    let owner = application
+        .identities()
+        .create(ActorKind::Service, "Schema publication integration owner")
+        .unwrap();
+    let other_owner = application
+        .identities()
+        .create(
+            ActorKind::Service,
+            "Schema publication integration intruder",
+        )
+        .unwrap();
+    let repository = PostgresAuthorityRepository::new(application.database().clone());
+    let name = SchemaName::new("billing.invoice").unwrap();
+
+    let first = repository
+        .publish(
+            SchemaKind::Artifact,
+            name.clone(),
+            owner.id(),
+            ContentDigest::from_bytes([1; 32]),
+            1_000,
+        )
+        .unwrap();
+    assert_eq!(first.version().version(), 1);
+    assert_eq!(first.version().predecessor(), None);
+    assert_eq!(first.status(), SchemaStatus::Published);
+
+    let second = repository
+        .publish(
+            SchemaKind::Artifact,
+            name.clone(),
+            owner.id(),
+            ContentDigest::from_bytes([2; 32]),
+            2_000,
+        )
+        .unwrap();
+    assert_eq!(second.version().version(), 2);
+    assert_eq!(second.version().predecessor(), Some(first.version().id()));
+
+    assert!(
+        repository
+            .publish(
+                SchemaKind::Artifact,
+                name.clone(),
+                other_owner.id(),
+                ContentDigest::from_bytes([3; 32]),
+                3_000,
+            )
+            .is_err(),
+        "a different service must not publish under an owned schema name"
+    );
+
+    assert_eq!(
+        repository
+            .find(SchemaKind::Artifact, &name, 1)
+            .unwrap()
+            .map(|record| record.status()),
+        Some(SchemaStatus::Published)
+    );
+    assert_eq!(
+        repository.find(SchemaKind::Artifact, &name, 99).unwrap(),
+        None
+    );
+
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be present");
+    let mut administrator =
+        Client::connect(&database_url, NoTls).expect("test database should connect");
+    let schema_version_id = first.version().id().to_string();
+    let activation_correlation = Uuid::new_v4();
+    let activated = set_schema_status(
+        &mut administrator,
+        schema_version_id.clone(),
+        "active",
+        activation_correlation,
+        1_500,
+    );
+    assert_eq!(activated.get::<_, String>("result_outcome"), "changed");
+    assert_eq!(
+        repository
+            .find(SchemaKind::Artifact, &name, 1)
+            .unwrap()
+            .map(|record| record.status()),
+        Some(SchemaStatus::Active)
+    );
+
+    let idempotent_retry = set_schema_status(
+        &mut administrator,
+        schema_version_id.clone(),
+        "active",
+        activation_correlation,
+        1_500,
+    );
+    assert_eq!(
+        idempotent_retry.get::<_, String>("result_outcome"),
+        "changed"
+    );
+
+    let retire_correlation = Uuid::new_v4();
+    set_schema_status(
+        &mut administrator,
+        schema_version_id.clone(),
+        "retired",
+        retire_correlation,
+        1_600,
+    );
+    let reactivate_attempt = administrator.query_opt(
+        "SELECT * FROM set_authority_schema_status($1::text::uuid, $2, $3, $4, $5::text::uuid, $6)",
+        &[
+            &schema_version_id,
+            &"active",
+            &"test-administrator",
+            &"reactivate",
+            &Uuid::new_v4().to_string(),
+            &1_700i64,
+        ],
+    );
+    assert!(
+        reactivate_attempt.is_err(),
+        "a retired schema version must never leave its terminal status"
+    );
+
+    assert!(
+        administrator
+            .execute(
+                "UPDATE authority_schema_versions SET status = 'active' \
+                 WHERE schema_version_id = $1::text::uuid",
+                &[&schema_version_id],
+            )
+            .is_err(),
+        "schema status changes must go through set_authority_schema_status"
+    );
+    assert!(
+        administrator
+            .execute(
+                "DELETE FROM authority_schema_versions WHERE schema_version_id = $1::text::uuid",
+                &[&schema_version_id],
+            )
+            .is_err(),
+        "authority schema versions must never be deleted"
+    );
+}
+
+fn set_schema_status(
+    client: &mut Client,
+    schema_version_id: String,
+    status: &str,
+    correlation_id: Uuid,
+    changed_at: i64,
+) -> Row {
+    client
+        .query_one(
+            "SELECT * FROM set_authority_schema_status($1::text::uuid, $2, $3, $4, $5::text::uuid, $6)",
+            &[
+                &schema_version_id,
+                &status,
+                &"test-administrator",
+                &"integration test status change",
+                &correlation_id.to_string(),
+                &changed_at,
+            ],
+        )
+        .unwrap()
 }

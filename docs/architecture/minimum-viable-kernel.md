@@ -321,17 +321,23 @@ Implementation status:
   publishing under an already-claimed name
   (`AuthorityError::SchemaNamespaceConflict`). `SchemaStatus` (Published,
   Active, Suspended, Superseded, Retired) exists as a value type read from
-  `SchemaRecord`; activation/suspension/supersession/retirement are
-  administrator-only and, like grant creation, are not yet backed by a
-  PostgreSQL adapter or an out-of-band administration function.
-- Pending: PostgreSQL-backed schema storage and the
-  activate/suspend/supersede/retire administration function, integrating
-  schema version references into `PolicyFacts`/`Grant` (deferred when the
-  pure fact/grant contract was first built), an authenticated network
-  `PolicyEvaluator` implementation and the outbound signed-call machinery it
-  needs, durable decision-pinning audit records, a reference external policy
-  evaluator service, and wiring this stage into `ServiceRequestGate`
-  (ADR-0013).
+  `SchemaRecord`.
+- Complete: PostgreSQL-backed schema storage. `publish_authority_schema_version`
+  atomically locks the current latest version for a `(kind, name)`, checks
+  owner consistency, and assigns the next version and predecessor link; it is
+  called directly by `PostgresAuthorityRepository` on behalf of any
+  authenticated service, unlike grant creation. `set_authority_schema_status`
+  is the administrator-only, idempotent, terminal-state-respecting
+  counterpart to `create_authority_grant`, moving a schema through
+  Published → Active/Retired → Suspended/Superseded/Retired with append-only
+  status audit; superseded and retired are terminal and the Rust kernel never
+  calls this function directly.
+- Pending: integrating schema version references into `PolicyFacts`/`Grant`
+  (deferred when the pure fact/grant contract was first built), an
+  authenticated network `PolicyEvaluator` implementation and the outbound
+  signed-call machinery it needs, durable decision-pinning audit records, a
+  reference external policy evaluator service, and wiring this stage into
+  `ServiceRequestGate` (ADR-0013).
 - The existing signature, replay, and communication-admission gate is the
   required precondition and MUST remain ahead of this authority step.
 

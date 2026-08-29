@@ -1,12 +1,16 @@
-//! Goal: read kernel-owned ILK-002 authority grants from PostgreSQL for the
-//! `AuthorityRepository` contract. Grant administration happens only through
-//! the out-of-band `create_authority_grant` database function, never through
-//! this adapter — the same split already used for communication admission.
+//! Goal: read kernel-owned ILK-002 authority grants and schema versions from
+//! PostgreSQL. Grant creation and schema status administration happen only
+//! through out-of-band database functions, never through this adapter — the
+//! same split already used for communication admission. Schema publication
+//! is the one write path this adapter does call, since any authenticated
+//! service may publish a schema version for a name it owns.
 
 use r2d2_postgres::postgres::Row;
 
 use crate::kernel::authority::{
-    AuthorityError, AuthorityRepository, Grant, GrantId, PolicyFacts, Scope,
+    AuthorityError, AuthorityRepository, ContentDigest, Grant, GrantId, PolicyFacts, SchemaKind,
+    SchemaName, SchemaRecord, SchemaRepository, SchemaStatus, SchemaVersion, SchemaVersionId,
+    Scope,
 };
 use crate::kernel::identity::ActorId;
 use crate::kernel::requests::ActionName;
@@ -22,6 +26,14 @@ const MATCHING_GRANTS_SQL: &str = "SELECT grant_id::text, source_service_id::tex
       AND (scope = '*' OR scope = $4) \
       AND valid_from <= $5 \
       AND (valid_until IS NULL OR valid_until > $5)";
+
+const PUBLISH_SCHEMA_VERSION_SQL: &str = "SELECT * FROM publish_authority_schema_version( \
+    $1::text::uuid, $2, $3, $4::text::uuid, $5, $6)";
+
+const FIND_SCHEMA_VERSION_SQL: &str = "SELECT schema_version_id::text, kind, name, version, \
+        owner_service_id::text, content_digest, predecessor_id::text, published_at, status \
+    FROM authority_schema_versions \
+    WHERE kind = $1 AND name = $2 AND version = $3";
 
 #[derive(Clone)]
 pub struct PostgresAuthorityRepository {
@@ -54,6 +66,51 @@ impl AuthorityRepository for PostgresAuthorityRepository {
     }
 }
 
+impl SchemaRepository for PostgresAuthorityRepository {
+    fn publish(
+        &self,
+        kind: SchemaKind,
+        name: SchemaName,
+        owner: ActorId,
+        content_digest: ContentDigest,
+        published_at: i64,
+    ) -> Result<SchemaRecord, AuthorityError> {
+        let mut connection = self.database.connection().map_err(repository_error)?;
+        let row = connection
+            .query_one(
+                PUBLISH_SCHEMA_VERSION_SQL,
+                &[
+                    &SchemaVersionId::new().to_string(),
+                    &schema_kind_to_sql(kind),
+                    &name.as_str(),
+                    &owner.to_string(),
+                    &content_digest.as_bytes().as_slice(),
+                    &published_at,
+                ],
+            )
+            .map_err(repository_error)?;
+        schema_record_from_row(&row)
+    }
+
+    fn find(
+        &self,
+        kind: SchemaKind,
+        name: &SchemaName,
+        version: i64,
+    ) -> Result<Option<SchemaRecord>, AuthorityError> {
+        let mut connection = self.database.connection().map_err(repository_error)?;
+        connection
+            .query_opt(
+                FIND_SCHEMA_VERSION_SQL,
+                &[&schema_kind_to_sql(kind), &name.as_str(), &version],
+            )
+            .map_err(repository_error)?
+            .as_ref()
+            .map(schema_record_from_row)
+            .transpose()
+    }
+}
+
 fn grant_from_row(row: &Row) -> Result<Grant, AuthorityError> {
     let id = row.get::<_, String>("grant_id").parse::<GrantId>()?;
     let source = row
@@ -82,6 +139,69 @@ fn grant_from_row(row: &Row) -> Result<Grant, AuthorityError> {
         row.get("valid_from"),
         row.get("valid_until"),
     )
+}
+
+fn schema_record_from_row(row: &Row) -> Result<SchemaRecord, AuthorityError> {
+    let id = row
+        .get::<_, String>("schema_version_id")
+        .parse::<SchemaVersionId>()?;
+    let kind = schema_kind_from_sql(&row.get::<_, String>("kind"))?;
+    let name = SchemaName::new(&row.get::<_, String>("name"))
+        .map_err(|_| AuthorityError::Repository("stored schema name is invalid".to_owned()))?;
+    let owner = row
+        .get::<_, String>("owner_service_id")
+        .parse::<ActorId>()
+        .map_err(|error| AuthorityError::Repository(format!("invalid stored owner ID: {error}")))?;
+    let content_digest: Vec<u8> = row.get("content_digest");
+    let content_digest: [u8; 32] = content_digest
+        .try_into()
+        .map_err(|_| AuthorityError::Repository("stored content digest is invalid".to_owned()))?;
+    let predecessor = row
+        .get::<_, Option<String>>("predecessor_id")
+        .map(|value| value.parse::<SchemaVersionId>())
+        .transpose()?;
+    let version = SchemaVersion::restore(
+        id,
+        kind,
+        name,
+        row.get("version"),
+        owner,
+        ContentDigest::from_bytes(content_digest),
+        predecessor,
+        row.get("published_at"),
+    )?;
+    let status = schema_status_from_sql(&row.get::<_, String>("status"))?;
+    Ok(SchemaRecord::restore(version, status))
+}
+
+fn schema_kind_to_sql(kind: SchemaKind) -> &'static str {
+    match kind {
+        SchemaKind::Artifact => "artifact",
+        SchemaKind::PermissionPolicy => "permission_policy",
+    }
+}
+
+fn schema_kind_from_sql(value: &str) -> Result<SchemaKind, AuthorityError> {
+    match value {
+        "artifact" => Ok(SchemaKind::Artifact),
+        "permission_policy" => Ok(SchemaKind::PermissionPolicy),
+        other => Err(AuthorityError::Repository(format!(
+            "unknown stored schema kind: {other}"
+        ))),
+    }
+}
+
+fn schema_status_from_sql(value: &str) -> Result<SchemaStatus, AuthorityError> {
+    match value {
+        "published" => Ok(SchemaStatus::Published),
+        "active" => Ok(SchemaStatus::Active),
+        "suspended" => Ok(SchemaStatus::Suspended),
+        "superseded" => Ok(SchemaStatus::Superseded),
+        "retired" => Ok(SchemaStatus::Retired),
+        other => Err(AuthorityError::Repository(format!(
+            "unknown stored schema status: {other}"
+        ))),
+    }
 }
 
 fn repository_error(error: impl std::fmt::Display) -> AuthorityError {

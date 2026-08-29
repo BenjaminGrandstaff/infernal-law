@@ -63,6 +63,13 @@ Migration 0009 creates append-only ILK-002 authority grants, an idempotent
 conflict-detecting `create_authority_grant` administration function, and
 append-only grant administration audit; the Rust kernel only ever reads
 grants, exactly as it only ever reads communication admission.
+Migration 0010 creates ILK-002 schema versions with an atomic,
+namespace-conflict-detecting `publish_authority_schema_version` function that
+the Rust kernel calls on behalf of any authenticated service publishing a
+schema it owns, plus an idempotent, terminal-state-respecting
+`set_authority_schema_status` administration function and append-only status
+audit for activation/suspension/supersession/retirement, which stay
+administrator-only exactly like grant creation.
 Applied migration versions are recorded in `kernel_schema_migrations`.
 
 The `PostgresIdentityRepository` adapter implements the identity module's
