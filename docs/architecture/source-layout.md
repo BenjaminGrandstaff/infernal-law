@@ -14,14 +14,18 @@ src/
 ├── infrastructure/
 │   ├── mod.rs              # external-system adapter boundary
 │   ├── database.rs         # pooled PostgreSQL and pgvector wiring
-│   └── postgres_identity_repository.rs
+│   ├── postgres_identity_repository.rs
 │                            # PostgreSQL ILK-001 adapter
+│   └── postgres_instance_registry.rs
+│                            # public keys, leases, revocation, audit
 ├── wiring.rs               # process dependency construction
 └── kernel/
     ├── mod.rs              # capability registry and registry tests
     ├── requirement.rs      # shared requirement metadata
     ├── identity.rs         # ILK-001
     ├── instance_keys.rs    # ephemeral per-process identity keys
+    ├── instance_registry.rs
+    │                       # kernel-owned public-key and lease contract
     ├── authority.rs        # ILK-002
     ├── resources.rs        # ILK-003
     ├── versions.rs         # ILK-004
@@ -41,9 +45,13 @@ tests/
 ├── identity_contract.rs    # independently runnable ILK-001 contract
 ├── instance_keys_contract.rs
 │                            # per-instance key isolation/signature contract
+├── instance_registry_contract.rs
+│                            # independently runnable lease-state contract
 ├── kernel_requirements.rs  # independently runnable public kernel test
-└── postgres_identity_repository.rs
-                             # opt-in ILK-001 durability test
+├── postgres_identity_repository.rs
+│                            # opt-in ILK-001 durability test
+└── postgres_instance_registry.rs
+                             # opt-in public-key/lease durability test
 ```
 
 Each capability owns its implementation and private unit tests. Cross-module
@@ -65,6 +73,7 @@ Run one integration-test file as its own test target:
 cargo test --test http_contract
 cargo test --test identity_contract
 cargo test --test instance_keys_contract
+cargo test --test instance_registry_contract
 cargo test --test kernel_requirements
 ```
 
@@ -75,6 +84,7 @@ export DATABASE_URL='postgres://infernal_law:YOUR_PASSWORD@127.0.0.1:5432/infern
 export INFERNAL_LAW_SERVICE_ID='00000000-0000-4000-8000-000000000001'
 cargo test --test database_connection -- --ignored
 cargo test --test postgres_identity_repository -- --ignored
+cargo test --test postgres_instance_registry -- --ignored
 ```
 
 Run the complete suite before merging:

@@ -8,8 +8,10 @@ use std::sync::Arc;
 
 use crate::infrastructure::database::{Database, DatabaseError};
 use crate::infrastructure::postgres_identity_repository::PostgresIdentityRepository;
+use crate::infrastructure::postgres_instance_registry::PostgresInstanceRegistry;
 use crate::kernel::identity::{ActorId, IdentityService};
 use crate::kernel::instance_keys::{InstanceCredential, InstancePublicKey, InstanceSignature};
+use crate::kernel::instance_registry::{InstanceRegistryService, LeasePolicy};
 
 pub const SERVICE_ID_ENV: &str = "INFERNAL_LAW_SERVICE_ID";
 
@@ -18,6 +20,7 @@ pub struct Application {
     database: Database,
     identities: IdentityService<PostgresIdentityRepository>,
     instance_credential: Arc<InstanceCredential>,
+    instance_registry: InstanceRegistryService<PostgresInstanceRegistry>,
 }
 
 impl Application {
@@ -33,11 +36,16 @@ impl Application {
         database.migrate()?;
         let identities = IdentityService::new(PostgresIdentityRepository::new(database.clone()));
         let instance_credential = Arc::new(InstanceCredential::generate(service_id));
+        let instance_registry = InstanceRegistryService::new(
+            PostgresInstanceRegistry::new(database.clone()),
+            LeasePolicy::default(),
+        );
 
         Ok(Self {
             database,
             identities,
             instance_credential,
+            instance_registry,
         })
     }
 
@@ -55,6 +63,10 @@ impl Application {
 
     pub fn sign_as_instance(&self, message: &[u8]) -> InstanceSignature {
         self.instance_credential.sign(message)
+    }
+
+    pub const fn instance_registry(&self) -> &InstanceRegistryService<PostgresInstanceRegistry> {
+        &self.instance_registry
     }
 }
 

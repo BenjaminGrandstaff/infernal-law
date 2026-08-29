@@ -9,6 +9,7 @@ pub mod events;
 pub mod idempotency;
 pub mod identity;
 pub mod instance_keys;
+pub mod instance_registry;
 pub mod mediation;
 pub mod relationships;
 mod requirement;

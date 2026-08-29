@@ -109,7 +109,11 @@ impl Database {
     pub fn migrate(&self) -> Result<(), DatabaseError> {
         let mut connection = self.connection()?;
         connection
-            .batch_execute(include_str!("../../migrations/0001_identities.sql"))
+            .batch_execute(concat!(
+                include_str!("../../migrations/0001_identities.sql"),
+                "\n",
+                include_str!("../../migrations/0002_instance_public_key_registry.sql")
+            ))
             .map_err(DatabaseError::Query)
     }
 

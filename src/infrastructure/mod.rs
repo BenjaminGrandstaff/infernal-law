@@ -3,3 +3,4 @@
 
 pub mod database;
 pub mod postgres_identity_repository;
+pub mod postgres_instance_registry;

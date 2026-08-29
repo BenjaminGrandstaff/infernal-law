@@ -263,6 +263,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom",
  "r2d2_postgres",
+ "sha2",
  "uuid",
 ]
 

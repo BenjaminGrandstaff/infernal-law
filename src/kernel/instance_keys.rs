@@ -7,6 +7,7 @@ use std::str::FromStr;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use getrandom::{SysRng, rand_core::UnwrapErr};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::identity::ActorId;
@@ -127,6 +128,10 @@ impl InstancePublicKey {
 
     pub const fn public_key_bytes(&self) -> &[u8; PUBLIC_KEY_LENGTH] {
         &self.public_key
+    }
+
+    pub fn fingerprint(&self) -> [u8; 32] {
+        Sha256::digest(self.public_key).into()
     }
 
     pub fn verify(

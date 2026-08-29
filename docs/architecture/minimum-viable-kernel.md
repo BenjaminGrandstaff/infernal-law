@@ -87,7 +87,10 @@ Implementation status:
   only service and worker principals.
 - Complete: unique per-process instance and key IDs, ephemeral Ed25519 signing
   keys, public verification records, and process-wide application wiring.
-- Pending: kernel-managed PostgreSQL public-key registration and leases,
+- Complete: kernel-owned PostgreSQL public-key registration, immutable key
+  records, bounded compare-and-set leases, revocation, and append-only registry
+  audit storage behind a typed repository contract.
+- Pending: authenticated initial enrollment, signed lease-renewal transport,
   kernel-to-subscriber discovery handshake, direct HTTP Message Signature
   verification, timestamp/nonce replay defense, and database communication
   admission.
