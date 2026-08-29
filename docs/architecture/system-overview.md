@@ -28,6 +28,8 @@ events, and work coordination explicit and traceable.
 ### Out of scope
 
 - Direct worker access to kernel-owned persistence
+- Caller-supplied SQL, database queries, procedure names, or database command
+  passthrough APIs
 - User registration, user credentials, sessions, and account recovery
 - Silently destructive updates to accepted history
 - Application-specific worker behavior beyond kernel coordination contracts
@@ -56,7 +58,8 @@ known.
 | Container image | Packages the service as a non-root process | Podman/OCI | `Containerfile` |
 | Database | Stores relational and vector data | PostgreSQL 17 with pgvector | `containers/postgres/` |
 | Runtime deployment | Runs and exposes the service | Kubernetes | `k8s/base/` |
-| Instance key agent | Generates a unique in-process keypair and publishes only the leased public record | Rust/secret-manager API | Planned |
+| Instance key agent | Generates a unique in-process keypair and registers only the leased public record through the kernel | Rust/kernel REST API | Partial |
+| Instance registry | Owns public keys, bounded leases, and registration history | Rust/PostgreSQL | Planned |
 | Kernel discovery reconciler | Finds subscribed instances and performs mutual proof-of-possession handshakes | Rust | Planned |
 
 ## Key flows
@@ -109,3 +112,5 @@ Rank the few qualities that drive architectural tradeoffs.
 
 - [ADR-0003: Use direct signed REST communication](decisions/0003-direct-signed-service-rest.md)
 - [ADR-0005: Use ephemeral per-instance service keys](decisions/0005-use-ephemeral-per-instance-service-keys.md)
+- [ADR-0006: Store instance public keys and leases in PostgreSQL](decisions/0006-store-instance-public-keys-in-postgresql.md)
+- [ADR-0007: Expose no SQL command surface](decisions/0007-expose-no-sql-command-surface.md)

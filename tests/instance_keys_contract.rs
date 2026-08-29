@@ -1,5 +1,5 @@
 //! Goal: verify the public per-instance key contract independently of HTTP,
-//! PostgreSQL, Kubernetes, and a particular secret manager.
+//! PostgreSQL, Kubernetes, and the future kernel registration contract.
 
 use infernal_law::kernel::identity::ActorId;
 use infernal_law::kernel::instance_keys::{

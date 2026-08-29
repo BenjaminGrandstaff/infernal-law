@@ -87,7 +87,7 @@ Implementation status:
   only service and worker principals.
 - Complete: unique per-process instance and key IDs, ephemeral Ed25519 signing
   keys, public verification records, and process-wide application wiring.
-- Pending: leased public-key registration in a secret manager,
+- Pending: kernel-managed PostgreSQL public-key registration and leases,
   kernel-to-subscriber discovery handshake, direct HTTP Message Signature
   verification, timestamp/nonce replay defense, and database communication
   admission.
@@ -292,8 +292,12 @@ Invariants:
 
 - Workers MUST mutate governed state only through authenticated kernel
   contracts.
+- No caller, including an administrative service, may submit SQL or database
+  command fragments for the kernel to execute.
 - Worker credentials MUST NOT grant direct write access to kernel-owned tables,
   event storage, or audit history.
+- Kernel persistence adapters MUST use kernel-owned statement structure and
+  bound values; caller-controlled identifiers or SQL structure are prohibited.
 - The kernel MUST enforce identity, authority, validation, idempotency,
   versioning, audit, and event rules at the mediation boundary.
 
@@ -302,6 +306,8 @@ Acceptance criteria:
 - A worker can complete its supported workflow using only kernel contracts.
 - A worker's runtime credentials cannot directly insert, update, or delete
   kernel-owned records.
+- SQL-shaped operations are rejected before a repository or database adapter
+  is called.
 - Bypassing one contract cannot bypass the cross-cutting kernel invariants.
 
 ## Transaction boundary

@@ -25,6 +25,13 @@ The initial adapter uses an unencrypted PostgreSQL connection for local and
 private-network development. TLS configuration is required before connecting
 to a database over an untrusted network.
 
+PostgreSQL is an internal implementation detail, not a kernel command surface.
+Only infrastructure adapters and trusted migrations contain SQL. Callers
+submit typed domain operations; they cannot submit statements, expressions,
+identifiers, or procedure names for execution. Adapter statements bind caller
+values as parameters and keep statement structure under kernel control. See
+[ADR-0007](decisions/0007-expose-no-sql-command-surface.md).
+
 ## Schema migrations
 
 Idempotent SQL migrations live in `migrations/` and are applied by the
@@ -46,12 +53,13 @@ physical schemas remain design work; their constraints must enforce the
 path.
 
 The planned service credential schema stores public-key fingerprints,
-algorithms, instance and boot IDs, secret-manager lease metadata,
-activation/revocation state, and handshake results. Private signing keys are
-not database or Kubernetes Secret data: each service process generates its own
-key and retains it only for that process lifetime. The secret manager contains
-the leased public-key record only. See
-[ADR-0005](decisions/0005-use-ephemeral-per-instance-service-keys.md).
+public-key bytes, algorithms, instance and boot IDs, bounded lease revisions
+and expiry, activation/revocation state, enrollment provenance, and handshake
+results. PostgreSQL is authoritative for this kernel-managed registry, and
+registration or renewal occurs only through kernel contracts. Private signing
+keys are not database or Kubernetes Secret data: each service process generates
+its own key and retains it only for that process lifetime. See
+[ADR-0006](decisions/0006-store-instance-public-keys-in-postgresql.md).
 
 ## Vector storage
 

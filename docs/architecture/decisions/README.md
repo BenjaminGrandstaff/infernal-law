@@ -30,3 +30,5 @@ They preserve the context and tradeoffs behind a decision.
 | [ADR-0003: Use direct signed REST communication](0003-direct-signed-service-rest.md) | Accepted | 2026-08-28 |
 | [ADR-0004: Provision service keys with Kubernetes Secrets](0004-provision-service-keys-with-kubernetes-secrets.md) | Superseded | 2026-08-28 |
 | [ADR-0005: Use ephemeral per-instance service keys](0005-use-ephemeral-per-instance-service-keys.md) | Accepted | 2026-08-28 |
+| [ADR-0006: Store instance public keys and leases in PostgreSQL](0006-store-instance-public-keys-in-postgresql.md) | Accepted | 2026-08-28 |
+| [ADR-0007: Expose no SQL command surface](0007-expose-no-sql-command-surface.md) | Accepted | 2026-08-28 |

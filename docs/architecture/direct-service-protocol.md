@@ -52,31 +52,33 @@ permitted.
 
 Every service process generates a unique keypair before becoming ready. The
 private key remains inside that one process and is never stored in a Kubernetes
-Secret, secret manager, PostgreSQL, image, or durable volume. A process restart,
-including a container restart within the same Pod, creates a new instance ID
-and keypair. In-memory key storage is preferred; any required file must be in
-instance-private RAM-backed storage.
+Secret, external secret manager, PostgreSQL, image, or durable volume. A process
+restart, including a container restart within the same Pod, creates a new
+instance ID and keypair. In-memory key storage is preferred; any required file
+must be in instance-private RAM-backed storage.
 
 The service publishes only its public key, fingerprint, algorithm, unique
 instance and key IDs, endpoint, creation/expiry times, and short-lived lease to
-a secret-manager registry. Publication is authorized by an independent
-platform workload identity scoped so that an instance cannot overwrite another
-service's registry path. PostgreSQL retains durable public-key fingerprints,
-verification outcomes, revocation/expiry state, and audit history as needed.
+the kernel's registration contract. The kernel validates a separate enrollment
+credential or platform workload proof, then atomically stores the instance,
+public key, bounded lease, and audit record in PostgreSQL. A service never
+writes these tables directly and cannot overwrite another service's records.
 
 Every kernel process discovers instances belonging to active subscriptions at
 startup and continuously afterward. For each candidate, it retrieves the public
-key from the secret manager and sends a fresh, kernel-signed challenge. The
-service verifies the kernel, signs the challenge and both parties' instance
-metadata, and returns the proof. The kernel verifies that proof against the
-registry key and atomically consumes the challenge nonce. Only that exact
-instance becomes `handshake_verified`.
+key and current lease from PostgreSQL and sends a fresh, kernel-signed
+challenge. The service verifies the kernel, signs the challenge and both
+parties' instance metadata, and returns the proof. The kernel verifies that
+proof against the database key and atomically consumes the challenge nonce.
+Only that exact instance becomes `handshake_verified`.
 
 The handshake proves reachability and current private-key possession. It does
 not grant admission, authority, readiness, capacity, or a work claim. A failed
 instance's subscription remains durable, but delivery pauses until a new
 instance publishes a fresh key and completes a new handshake. See
 [ADR-0005](decisions/0005-use-ephemeral-per-instance-service-keys.md).
+Registry ownership and persistence are specified by
+[ADR-0006](decisions/0006-store-instance-public-keys-in-postgresql.md).
 
 ## Verification order
 
@@ -96,6 +98,18 @@ For every non-public request, the kernel MUST:
 
 Failure at any step rejects the request before governed state mutation. Health
 does not bypass these checks.
+
+## No SQL command surface
+
+REST operations are typed kernel commands and queries. No endpoint accepts raw
+SQL, database expressions, caller-selected database identifiers, stored
+procedure names, or a generic query language that can mutate kernel state.
+SQL-shaped or unknown operations are rejected before repository access.
+
+Kernel-owned PostgreSQL adapters may use fixed, parameterized SQL internally.
+That persistence detail is not part of the wire protocol, and a service never
+receives database credentials through the kernel. See
+[ADR-0007](decisions/0007-expose-no-sql-command-surface.md).
 
 ## Admission database attribute
 
@@ -184,7 +198,7 @@ dead.
 - service identities;
 - public keys with activation, expiry, and revocation metadata;
 - unique service-instance, boot, and key IDs;
-- secret-manager registration provenance and lease revisions;
+- enrollment provenance and database lease revisions;
 - kernel challenge and successful-handshake records;
 - `communication_enabled` plus append-only admission history;
 - used nonce/request IDs for the replay window;
@@ -219,12 +233,11 @@ dead.
 
 1. Choose the signing algorithm, key encoding, fingerprint profile, key
    lifetime, and lease windows.
-2. Select the secret manager and define create-only per-service registry
-   policies based on platform workload identity.
+2. Add PostgreSQL instance, immutable public-key, bounded lease, and audit
+   records plus an authenticated registration contract.
 3. Rename the current active/disabled identity state to the explicit
    `communication_enabled` admission concept.
-4. Add instance, public-key lease, handshake, and append-only admission-history
-   records.
+4. Add handshake and append-only admission-history records.
 5. Implement service-local ephemeral key generation and the mutual discovery
    handshake.
 6. Implement the HTTP Message Signatures

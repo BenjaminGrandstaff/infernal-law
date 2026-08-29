@@ -1,5 +1,5 @@
-//! Goal: own PostgreSQL connection wiring, pooled access, readiness checks, and
-//! verification that the required pgvector extension is available.
+//! Goal: own internal PostgreSQL wiring, readiness, and pgvector verification
+//! without exposing a caller-supplied SQL command surface.
 
 use std::env;
 use std::error::Error;
