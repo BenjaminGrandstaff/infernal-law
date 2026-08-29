@@ -231,9 +231,13 @@ Acceptance criteria:
 
 Implementation status:
 
+- Complete: the typed immutable core records a stable Request ID, source
+  service, destination service, and validated namespaced action.
+- Complete: the core contract has an independently runnable test and exposes
+  no field mutation operations.
 - Partial foundation: the implemented replay layer permanently binds a source
   service and request ID to a semantic fingerprint.
-- Pending: the complete durable Request envelope, destination, action, artifact
+- Pending: PostgreSQL durability, authenticated-envelope construction, artifact
   descriptor, schema references, correlation relationships, and routing state.
 
 ### ILK-004: Versions

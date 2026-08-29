@@ -50,7 +50,7 @@ src/
     │                       # atomic nonce and request-ID contract
     ├── request_gate.rs     # signature/replay/admission composition
     ├── authority.rs        # ILK-002
-    ├── resources.rs        # ILK-003
+    ├── requests.rs         # typed immutable ILK-003 core Request
     ├── versions.rs         # ILK-004
     ├── relationships.rs    # ILK-005
     ├── artifacts.rs        # ILK-006
@@ -66,6 +66,7 @@ tests/
 ├── database_connection.rs  # opt-in live PostgreSQL test
 ├── http_contract.rs        # independently runnable public HTTP test
 ├── identity_contract.rs    # independently runnable ILK-001 contract
+├── request_contract.rs     # independently runnable ILK-003 contract
 ├── instance_keys_contract.rs
 │                            # per-instance key isolation/signature contract
 ├── instance_registry_contract.rs
@@ -125,6 +126,7 @@ Run one integration-test file as its own test target:
 ```sh
 cargo test --test http_contract
 cargo test --test identity_contract
+cargo test --test request_contract
 cargo test --test instance_keys_contract
 cargo test --test instance_registry_contract
 cargo test --test enrollment_contract

@@ -1,12 +1,12 @@
-//! Goal: implement ILK-005 by connecting resources through validated, typed,
-//! and historically preserved links.
+//! Goal: implement ILK-005 by connecting requests and artifacts through
+//! validated, typed, and historically preserved links.
 
 use super::Requirement;
 
 pub const REQUIREMENT: Requirement = Requirement::new(
     "ILK-005",
     "Relationships",
-    "Resources can be connected by typed links.",
+    "Requests and artifacts can be connected by typed links.",
 );
 
 #[cfg(test)]

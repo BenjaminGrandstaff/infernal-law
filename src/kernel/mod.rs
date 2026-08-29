@@ -17,8 +17,8 @@ pub mod mediation;
 pub mod relationships;
 pub mod replay_protection;
 pub mod request_gate;
+pub mod requests;
 mod requirement;
-pub mod resources;
 pub mod service_requests;
 pub mod subscriptions;
 pub mod versions;
@@ -29,7 +29,7 @@ pub use requirement::Requirement;
 pub const REQUIREMENTS: [Requirement; 13] = [
     identity::REQUIREMENT,
     authority::REQUIREMENT,
-    resources::REQUIREMENT,
+    requests::REQUIREMENT,
     versions::REQUIREMENT,
     relationships::REQUIREMENT,
     artifacts::REQUIREMENT,
