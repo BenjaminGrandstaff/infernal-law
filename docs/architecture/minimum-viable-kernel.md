@@ -94,9 +94,11 @@ Implementation status:
   handshakes, and fixed-profile Ed25519 HTTP Message Signature verification
   covering the request method, target URI, content, stable service, instance,
   key, and request ID with bounded signature timestamps.
-- Pending: signed lease-renewal transport, atomic nonce replay defense,
-  transport middleware for governed routes, and database communication
-  admission.
+- Complete: atomic PostgreSQL nonce-digest consumption, permanent
+  service/request-ID fingerprint binding, safe-retry classification, conflict
+  rejection, and append-only accepted/rejected replay audit.
+- Pending: signed lease-renewal transport, transport middleware for governed
+  routes, and database communication admission.
 - Pending: mediation and audit integration that attributes every completed
   operation to that service and signing key.
 

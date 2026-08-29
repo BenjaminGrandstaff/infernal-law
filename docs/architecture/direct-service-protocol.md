@@ -58,9 +58,14 @@ The verifier resolves the named instance from the kernel-owned registry,
 requires a current unrevoked lease, checks that the stable service, instance,
 and key IDs all match, verifies the body digest, and then verifies the Ed25519
 signature. It returns typed verified context containing those IDs and the
-unique request ID. Persistent nonce reservation, communication admission,
-authority, and governed-route HTTP middleware remain separate fail-closed
-steps; cryptographic verification alone does not authorize an operation.
+unique request ID. The next kernel layer atomically stores the key-scoped nonce
+digest and binds the service/request ID to a semantic request fingerprint.
+Exact nonce reuse is rejected, the same request ID with different content is a
+conflict, and a new signature and nonce over the same semantic request is
+classified as a safe retry for later idempotency resolution. Raw nonces are not
+persisted. Communication admission, authority, and governed-route HTTP
+middleware remain separate fail-closed steps; cryptographic verification and
+replay reservation alone do not authorize an operation.
 
 ## Per-instance key creation and public-key registry
 
@@ -269,7 +274,7 @@ dead.
 - enrollment provenance and database lease revisions;
 - kernel challenge and successful-handshake records;
 - `communication_enabled` plus append-only admission history;
-- used nonce/request IDs for the replay window;
+- immutable nonce digests and service/request-ID fingerprint bindings;
 - subscriptions and durable delivery cursors;
 - latest health/capacity observation and observation time;
 - work claims and lease state; and
@@ -308,9 +313,9 @@ dead.
 4. Add handshake and append-only admission-history records.
 5. Implement service-local ephemeral key generation and the mutual discovery
    handshake.
-6. Implement the HTTP Message Signatures
-   profile with deterministic conformance vectors.
-7. Add timestamp, nonce, replay, and idempotency enforcement.
+6. Complete: implement the HTTP Message Signatures profile.
+7. Partial: timestamp and atomic nonce/request-ID replay enforcement are
+   implemented; governed-operation idempotency results remain pending.
 8. Implement signed subscription REST contracts.
 9. Define the shared health snapshot and separate live, ready, and capacity
    projections.

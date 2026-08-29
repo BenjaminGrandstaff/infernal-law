@@ -1,7 +1,7 @@
 # Data architecture
 
 > Status: Draft  
-> Last reviewed: 2026-08-28  
+> Last reviewed: 2026-08-29
 > Owners: TODO
 
 ## Database
@@ -44,6 +44,8 @@ Migration 0004 creates stable-service subscriptions, one-active-event
 uniqueness, immutable disabled history, and append-only subscription audit.
 Migration 0005 creates append-preserving per-kernel handshake challenges,
 successful handshake history, freshness indexes, and handshake audit records.
+Migration 0006 creates immutable service/request-ID fingerprint bindings,
+key-scoped nonce-digest reservations, and append-only replay outcome audit.
 Applied migration versions are recorded in `kernel_schema_migrations`.
 
 The `PostgresIdentityRepository` adapter implements the identity module's
@@ -70,6 +72,14 @@ its own key and retains it only for that process lifetime. See
 [ADR-0006](decisions/0006-store-instance-public-keys-in-postgresql.md).
 Initial enrollment is defined by
 [ADR-0008](decisions/0008-use-kubernetes-tokenreview-for-initial-enrollment.md).
+
+Replay protection stores SHA-256 nonce digests rather than raw nonces. Nonce
+uniqueness is scoped to the ephemeral key. Stable request IDs are scoped to the
+service and permanently bound to a semantic request fingerprint. A newly
+signed request with the same ID and fingerprint is classified as a safe retry
+for ILK-012; a repeated nonce is rejected as wire replay, and the same request
+ID with different content is rejected as a conflict. Fresh, safe-retry, replay,
+and conflict outcomes are appended to protected audit history.
 
 ## Vector storage
 

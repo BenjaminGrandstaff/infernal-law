@@ -24,6 +24,8 @@ src/
 │                            # PostgreSQL ILK-001 adapter
 │   ├── postgres_instance_registry.rs
 │                            # public keys, leases, revocation, audit
+│   ├── postgres_replay_protection_repository.rs
+│   │                        # atomic nonce/request-ID replay persistence
 │   ├── postgres_handshake_repository.rs
 │   │                        # challenge consumption and handshake history
 │   ├── postgres_subscribed_instance_discovery.rs
@@ -41,6 +43,8 @@ src/
     ├── enrollment.rs       # initial workload/key authentication contract
     ├── handshakes.rs       # subscribed-instance proof reconciler and gate
     ├── service_requests.rs # fixed signed-HTTP verification profile
+    ├── replay_protection.rs
+    │                       # atomic nonce and request-ID contract
     ├── authority.rs        # ILK-002
     ├── resources.rs        # ILK-003
     ├── versions.rs         # ILK-004
@@ -73,6 +77,8 @@ tests/
 │                            # isolated signed/failure-isolation contract
 ├── service_request_signature_contract.rs
 │                            # isolated signed-HTTP verification contract
+├── replay_protection_contract.rs
+│                            # isolated atomic replay/safe-retry contract
 ├── kernel_requirements.rs  # independently runnable public kernel test
 ├── postgres_identity_repository.rs
 │                            # opt-in ILK-001 durability test
@@ -82,6 +88,8 @@ tests/
 │                            # opt-in ILK-010 durability/history test
 ├── postgres_handshake_reconciler.rs
 │                            # opt-in discovery/handshake persistence test
+├── postgres_replay_protection.rs
+│                            # opt-in replay persistence/guard test
 └── postgres_instance_registry.rs
                              # opt-in public-key/lease durability test
 ```
@@ -112,6 +120,7 @@ cargo test --test enrollment_http_contract
 cargo test --test subscription_contract
 cargo test --test handshake_reconciler_contract
 cargo test --test service_request_signature_contract
+cargo test --test replay_protection_contract
 cargo test --test kernel_requirements
 ```
 
@@ -126,6 +135,7 @@ cargo test --test postgres_instance_registry -- --ignored
 cargo test --test postgres_enrollment_bindings -- --ignored
 cargo test --test postgres_subscription_repository -- --ignored
 cargo test --test postgres_handshake_reconciler -- --ignored
+cargo test --test postgres_replay_protection -- --ignored
 ```
 
 Run the complete suite before merging:

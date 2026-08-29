@@ -7,5 +7,6 @@ pub mod postgres_enrollment_binding_repository;
 pub mod postgres_handshake_repository;
 pub mod postgres_identity_repository;
 pub mod postgres_instance_registry;
+pub mod postgres_replay_protection_repository;
 pub mod postgres_subscribed_instance_discovery;
 pub mod postgres_subscription_repository;

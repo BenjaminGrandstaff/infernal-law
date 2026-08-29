@@ -118,7 +118,9 @@ impl Database {
                 "\n",
                 include_str!("../../migrations/0004_subscriptions.sql"),
                 "\n",
-                include_str!("../../migrations/0005_instance_handshakes.sql")
+                include_str!("../../migrations/0005_instance_handshakes.sql"),
+                "\n",
+                include_str!("../../migrations/0006_service_request_replay_protection.sql")
             ))
             .map_err(DatabaseError::Query)
     }

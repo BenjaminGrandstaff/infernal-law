@@ -213,6 +213,8 @@ pub struct VerifiedServiceRequest {
     request_id: Uuid,
     created: i64,
     expires: i64,
+    nonce_digest: [u8; 32],
+    request_fingerprint: [u8; 32],
 }
 
 impl VerifiedServiceRequest {
@@ -238,6 +240,14 @@ impl VerifiedServiceRequest {
 
     pub const fn expires(self) -> i64 {
         self.expires
+    }
+
+    pub const fn nonce_digest(self) -> [u8; 32] {
+        self.nonce_digest
+    }
+
+    pub const fn request_fingerprint(self) -> [u8; 32] {
+        self.request_fingerprint
     }
 }
 
@@ -315,6 +325,8 @@ where
             request_id: request.parts().request_id(),
             created: metadata.created,
             expires: metadata.expires,
+            nonce_digest: Sha256::digest(metadata.nonce.as_bytes()).into(),
+            request_fingerprint: request_fingerprint(request),
         })
     }
 }
@@ -323,6 +335,7 @@ struct SignatureMetadata {
     parameters: String,
     created: i64,
     expires: i64,
+    nonce: String,
     key_id: KeyId,
 }
 
@@ -366,6 +379,7 @@ fn parse_signature_input(
         parameters: parameters.to_owned(),
         created,
         expires,
+        nonce: nonce.to_owned(),
         key_id,
     })
 }
@@ -409,6 +423,21 @@ fn signature_base(
 
 fn content_digest(body: &[u8]) -> String {
     format!("sha-256=:{}:", STANDARD.encode(Sha256::digest(body)))
+}
+
+fn request_fingerprint(request: &SignedServiceRequest) -> [u8; 32] {
+    Sha256::digest(
+        format!(
+            "\"@method\": {}\n\"@target-uri\": {}\n\"content-digest\": {}\n\"content-type\": {}\n\"infernal-service-id\": {}",
+            request.parts().method(),
+            request.parts().target_uri(),
+            request.content_digest(),
+            request.parts().content_type(),
+            request.service_id(),
+        )
+        .as_bytes(),
+    )
+    .into()
 }
 
 fn verify_content_digest(
