@@ -528,12 +528,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "infernal-client-rs"
+version = "0.1.0"
+source = "git+https://github.com/BenjaminGrandstaff/infernal-client-rs?rev=fc0c0f39eff1e58586c758c3910267bf9605421c#fc0c0f39eff1e58586c758c3910267bf9605421c"
+dependencies = [
+ "base64",
+ "ed25519-dalek",
+ "getrandom 0.4.3",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "uuid",
+]
+
+[[package]]
 name = "infernal-law"
 version = "0.1.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
  "getrandom 0.4.3",
+ "infernal-client-rs",
  "r2d2_postgres",
  "reqwest",
  "serde",

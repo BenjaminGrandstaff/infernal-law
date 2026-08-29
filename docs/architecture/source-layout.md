@@ -94,6 +94,9 @@ tests/
 │                            # ordered fail-closed gate contract
 ├── governed_http_middleware_contract.rs
 │                            # strict HTTP extraction/sanitization contract
+├── infernal_client_rs_wire_compatibility.rs
+│                            # proves the infernal-client-rs dev-dependency's
+│                            # signed output verifies against this kernel
 ├── kernel_requirements.rs  # independently runnable public kernel test
 ├── postgres_identity_repository.rs
 │                            # opt-in ILK-001 durability test
@@ -149,6 +152,7 @@ cargo test --test replay_protection_contract
 cargo test --test admission_contract
 cargo test --test service_request_gate_contract
 cargo test --test governed_http_middleware_contract
+cargo test --test infernal_client_rs_wire_compatibility
 cargo test --test kernel_requirements
 ```
 

@@ -357,10 +357,17 @@ Implementation status:
   can verify a kernel-signed message without static configuration that
   breaks on every kernel restart (ADR-0014). Correct behavior behind multiple
   kernel replicas remains a documented follow-up.
-- Pending: an authenticated network `PolicyEvaluator` implementation and the
-  outbound signed-call machinery it needs (which can now build on
-  `GET /v1/kernel-identity`), a reference external policy evaluator service,
-  and wiring this stage into `ServiceRequestGate` (ADR-0013).
+- The outbound signed-call machinery itself now exists outside the kernel:
+  `infernal-client-rs` ([ADR-0012](decisions/0012-rust-first-client-sdk-family-over-signed-rest.md))
+  implements the signing side of ADR-0003 and verifying a kernel identity
+  against `GET /v1/kernel-identity`, and this repository's own test suite
+  proves a request it signs is accepted by the kernel's real, unmodified
+  `ServiceRequestVerifier` (`tests/infernal_client_rs_wire_compatibility.rs`,
+  a dev-dependency only — the kernel does not depend on it at runtime yet).
+- Pending: an authenticated network `PolicyEvaluator` implementation that
+  actually uses this machinery to call an evaluator, a reference external
+  policy evaluator service, and wiring this stage into `ServiceRequestGate`
+  (ADR-0013).
 - The existing signature, replay, and communication-admission gate is the
   required precondition and MUST remain ahead of this authority step.
 
