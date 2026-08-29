@@ -15,9 +15,11 @@ the [export notice](docs/export-control.md) for scope and limitations.
 
 ## Development
 
-Run the service locally:
+Run the service locally after starting PostgreSQL and setting its connection
+URL:
 
 ```sh
+export DATABASE_URL='postgres://infernal_law:YOUR_PASSWORD@127.0.0.1:5432/infernal_law'
 cargo run
 ```
 
@@ -27,7 +29,11 @@ It listens on `0.0.0.0:8080` by default and provides:
 - `GET /health/live`
 - `GET /health/ready`
 
-Set `BIND_ADDRESS` or `PORT` to change the listener configuration.
+Set `BIND_ADDRESS` or `PORT` to change the listener configuration. Startup
+fails if `DATABASE_URL` is absent, PostgreSQL cannot be reached, or the
+`vector` extension is unavailable. The readiness endpoint also checks the
+database connection. Startup applies the idempotent schema migrations in
+[`migrations/`](migrations/) before accepting requests.
 
 The kernel is split into independently testable capability modules. See the
 [Rust source layout](docs/architecture/source-layout.md) for targeted test
@@ -35,11 +41,18 @@ commands and module ownership.
 
 ## Podman
 
-Build and run the rootless container:
+Create a private application network and build the rootless application image:
 
 ```sh
+podman network create infernal-law
 podman build -t localhost/infernal-law:latest .
-podman run --rm --name infernal-law -p 8080:8080 \
+```
+
+After starting PostgreSQL as described below, run the application:
+
+```sh
+podman run --rm --name infernal-law --network infernal-law -p 8080:8080 \
+  --env DATABASE_URL='postgres://infernal_law:YOUR_PASSWORD@infernal-law-postgres:5432/infernal_law' \
   localhost/infernal-law:latest
 ```
 
@@ -55,6 +68,7 @@ podman build -f containers/postgres/Containerfile \
   -t localhost/infernal-law-postgres:17 .
 podman volume create infernal-law-postgres-data
 podman run --detach --name infernal-law-postgres \
+  --network infernal-law \
   --env-file containers/postgres/postgres.env \
   --publish 127.0.0.1:5432:5432 \
   --volume infernal-law-postgres-data:/var/lib/postgresql/data:Z \
@@ -80,7 +94,9 @@ podman start infernal-law-postgres
 ```
 
 The database port is bound to loopback only. The local environment file and
-database volume are intentionally not committed to the repository.
+database volume are intentionally not committed to the repository. Containers
+communicate over the private `infernal-law` network; the loopback port exists
+for development tools running directly on the host.
 
 ## Kubernetes
 
@@ -89,6 +105,8 @@ Kustomize support built into `kubectl`:
 
 ```sh
 kubectl kustomize k8s/base
+kubectl create secret generic infernal-law-database \
+  --from-literal=url='postgres://USER:PASSWORD@DATABASE_HOST:5432/DATABASE_NAME'
 kubectl apply -k k8s/base
 kubectl port-forward service/infernal-law 8080:80
 ```
@@ -96,3 +114,5 @@ kubectl port-forward service/infernal-law 8080:80
 The default image name is `localhost/infernal-law:latest`, suitable for a local
 cluster that can access Podman's image store. For a remote cluster, publish the
 image to a registry and replace the image name before applying the manifests.
+The Deployment expects a Secret named `infernal-law-database` with a `url` key;
+the repository does not commit database credentials.

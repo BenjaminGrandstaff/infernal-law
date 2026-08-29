@@ -6,6 +6,8 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
+use crate::wiring::Application;
+
 const DEFAULT_ADDRESS: &str = "0.0.0.0";
 const DEFAULT_PORT: &str = "8080";
 
@@ -16,7 +18,7 @@ pub struct Response {
     pub body: &'static str,
 }
 
-pub fn serve() -> std::io::Result<()> {
+pub fn serve(application: Application) -> std::io::Result<()> {
     let address = env::var("BIND_ADDRESS").unwrap_or_else(|_| DEFAULT_ADDRESS.to_owned());
     let port = env::var("PORT").unwrap_or_else(|_| DEFAULT_PORT.to_owned());
     let listener = TcpListener::bind(format!("{address}:{port}"))?;
@@ -26,8 +28,9 @@ pub fn serve() -> std::io::Result<()> {
     for connection in listener.incoming() {
         match connection {
             Ok(stream) => {
-                thread::spawn(|| {
-                    if let Err(error) = handle_connection(stream) {
+                let application = application.clone();
+                thread::spawn(move || {
+                    if let Err(error) = handle_connection(stream, &application) {
                         eprintln!("request failed: {error}");
                     }
                 });
@@ -39,7 +42,7 @@ pub fn serve() -> std::io::Result<()> {
     Ok(())
 }
 
-fn handle_connection(mut stream: TcpStream) -> std::io::Result<()> {
+fn handle_connection(mut stream: TcpStream, application: &Application) -> std::io::Result<()> {
     let mut request = [0_u8; 1024];
     let bytes_read = stream.read(&mut request)?;
     let request_line = String::from_utf8_lossy(&request[..bytes_read]);
@@ -48,7 +51,11 @@ fn handle_connection(mut stream: TcpStream) -> std::io::Result<()> {
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .unwrap_or("/");
-    let response = route(path);
+    let response = if path == "/health/ready" {
+        readiness_response(application.database().check_connection().is_ok())
+    } else {
+        route(path)
+    };
     let serialized = format!(
         "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         response.status,
@@ -67,7 +74,7 @@ pub fn route(path: &str) -> Response {
             content_type: "application/json",
             body: "{\"service\":\"infernal-law\"}\n",
         },
-        "/health/live" | "/health/ready" => Response {
+        "/health/live" => Response {
             status: "200 OK",
             content_type: "text/plain",
             body: "ok\n",
@@ -80,14 +87,35 @@ pub fn route(path: &str) -> Response {
     }
 }
 
+pub fn readiness_response(database_ready: bool) -> Response {
+    if database_ready {
+        Response {
+            status: "200 OK",
+            content_type: "text/plain",
+            body: "ok\n",
+        }
+    } else {
+        Response {
+            status: "503 Service Unavailable",
+            content_type: "text/plain",
+            body: "database unavailable\n",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::route;
+    use super::{readiness_response, route};
 
     #[test]
     fn health_endpoints_are_available() {
         assert_eq!(route("/health/live").status, "200 OK");
-        assert_eq!(route("/health/ready").status, "200 OK");
+        assert_eq!(readiness_response(true).status, "200 OK");
+    }
+
+    #[test]
+    fn readiness_fails_when_the_database_is_unavailable() {
+        assert_eq!(readiness_response(false).status, "503 Service Unavailable");
     }
 
     #[test]

@@ -3,5 +3,8 @@ name = "infernal-law"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+rust-version = "1.85"
 
 [dependencies]
+r2d2_postgres = "0.18.2"
+uuid = { version = "1.26.0", features = ["v4"] }

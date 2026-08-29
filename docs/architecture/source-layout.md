@@ -11,6 +11,12 @@ src/
 ├── main.rs                 # thin executable entry point
 ├── lib.rs                  # public library boundary
 ├── http.rs                 # HTTP transport and colocated unit tests
+├── infrastructure/
+│   ├── mod.rs              # external-system adapter boundary
+│   ├── database.rs         # pooled PostgreSQL and pgvector wiring
+│   └── postgres_identity_repository.rs
+│                            # PostgreSQL ILK-001 adapter
+├── wiring.rs               # process dependency construction
 └── kernel/
     ├── mod.rs              # capability registry and registry tests
     ├── requirement.rs      # shared requirement metadata
@@ -29,8 +35,12 @@ src/
     └── mediation.rs        # ILK-013
 
 tests/
+├── database_connection.rs  # opt-in live PostgreSQL test
 ├── http_contract.rs        # independently runnable public HTTP test
-└── kernel_requirements.rs  # independently runnable public kernel test
+├── identity_contract.rs    # independently runnable ILK-001 contract
+├── kernel_requirements.rs  # independently runnable public kernel test
+└── postgres_identity_repository.rs
+                             # opt-in ILK-001 durability test
 ```
 
 Each capability owns its implementation and private unit tests. Cross-module
@@ -50,7 +60,16 @@ Run one integration-test file as its own test target:
 
 ```sh
 cargo test --test http_contract
+cargo test --test identity_contract
 cargo test --test kernel_requirements
+```
+
+Run the live database wiring test after starting the pgvector container:
+
+```sh
+export DATABASE_URL='postgres://infernal_law:YOUR_PASSWORD@127.0.0.1:5432/infernal_law'
+cargo test --test database_connection -- --ignored
+cargo test --test postgres_identity_repository -- --ignored
 ```
 
 Run the complete suite before merging:

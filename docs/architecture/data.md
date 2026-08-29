@@ -13,12 +13,45 @@ the extension is enabled during first-time database initialization.
 Database files live in the Podman-managed `infernal-law-postgres-data` volume.
 The host exposes PostgreSQL only on the loopback interface at port 5432.
 
+The Rust process connects through the pooled `Database` adapter in
+`src/infrastructure/database.rs`. Startup verifies both PostgreSQL connectivity
+and the presence of pgvector. The adapter owns raw database access so kernel
+capability modules do not depend directly on the PostgreSQL client library.
+Connection URLs are treated as secrets and the configuration type does not
+implement debug formatting, preventing accidental password disclosure through
+routine diagnostics.
+
+The initial adapter uses an unencrypted PostgreSQL connection for local and
+private-network development. TLS configuration is required before connecting
+to a database over an untrusted network.
+
+## Schema migrations
+
+Idempotent SQL migrations live in `migrations/` and are applied by the
+application wiring before the HTTP listener starts. Migration 0001 creates the
+identity table and database constraints for actor kind, lifecycle status, and
+display-name validity. Applied migration versions are recorded in
+`kernel_schema_migrations`.
+
+The `PostgresIdentityRepository` adapter implements the identity module's
+repository contract. Kernel identity behavior remains independently testable
+without PostgreSQL, while the opt-in live integration test verifies durable
+identity state across new application connections.
+
 The minimum kernel requires durable records for identities, authority,
 resources and versions, typed relationships, artifacts, decisions, audit,
 events, subscriptions, work claims, and idempotency results. Logical and
 physical schemas remain design work; their constraints must enforce the
 [kernel invariants](minimum-viable-kernel.md), not merely represent the happy
 path.
+
+The planned service credential schema stores public-key fingerprints,
+algorithms, instance and boot IDs, secret-manager lease metadata,
+activation/revocation state, and handshake results. Private signing keys are
+not database or Kubernetes Secret data: each service process generates its own
+key and retains it only for that process lifetime. The secret manager contains
+the leased public-key record only. See
+[ADR-0005](decisions/0005-use-ephemeral-per-instance-service-keys.md).
 
 ## Vector storage
 

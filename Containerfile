@@ -3,6 +3,7 @@ FROM docker.io/library/rust:1.85-bookworm AS builder
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY migrations ./migrations
 RUN cargo build --locked --release
 
 FROM docker.io/library/debian:bookworm-slim AS runtime

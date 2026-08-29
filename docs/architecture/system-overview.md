@@ -6,16 +6,19 @@
 
 ## Purpose
 
-**Infernal-Law** is a governance kernel that mediates work performed by human,
-service, and worker identities. It provides durable, versioned resources and
-evidence while making authority, decisions, audit history, events, and work
-coordination explicit and traceable.
+**Infernal-Law** is a governance kernel that mediates work performed by
+authenticated service principals, including workers. User authentication is a
+separate service responsibility. The kernel provides durable, versioned
+resources and evidence while making authority, decisions, audit history,
+events, and work coordination explicit and traceable.
 
 ## Scope
 
 ### In scope
 
 - Identity-aware and authorized kernel operations
+- Direct public/private-key-signed REST communication and database-backed
+  admission of service principals
 - Durable, versioned resources, relationships, artifacts, and decisions
 - Append-only audit history and committed-change events
 - Worker subscriptions, exclusive work claims, and idempotent requests
@@ -25,6 +28,7 @@ coordination explicit and traceable.
 ### Out of scope
 
 - Direct worker access to kernel-owned persistence
+- User registration, user credentials, sessions, and account recovery
 - Silently destructive updates to accepted history
 - Application-specific worker behavior beyond kernel coordination contracts
 - Capabilities beyond the documented [minimum viable kernel](minimum-viable-kernel.md)
@@ -36,11 +40,12 @@ TODO: List the people and external systems that interact with infernal-law.
 Replace this placeholder with a context diagram once those relationships are
 known.
 
-| Actor or system | Relationship | Data exchanged |
+| Participant or system | Relationship | Data exchanged |
 | --- | --- | --- |
-| Human or service actor | Requests governed operations | Identity evidence, commands, query results |
-| Worker | Subscribes, claims work, and submits artifacts | Events, claims, evidence, results |
-| Identity provider | Supplies verifiable identity evidence | Credentials and identity attributes |
+| User-authentication service | Authenticates users outside the kernel and calls through its workload identity | External subject assertions and commands |
+| Backend service | Sends direct signed REST operations | HTTP message signatures, commands, query results |
+| Worker service | Subscribes, reports health/capacity, claims work, and submits artifacts | Signed REST, events, claims, evidence, results |
+| Administrative program | Toggles durable communication admission | Audited database admission-state changes |
 | Event consumer or transport | Delivers committed facts to workers | Typed, versioned events |
 
 ## Major components
@@ -51,18 +56,21 @@ known.
 | Container image | Packages the service as a non-root process | Podman/OCI | `Containerfile` |
 | Database | Stores relational and vector data | PostgreSQL 17 with pgvector | `containers/postgres/` |
 | Runtime deployment | Runs and exposes the service | Kubernetes | `k8s/base/` |
+| Instance key agent | Generates a unique in-process keypair and publishes only the leased public record | Rust/secret-manager API | Planned |
+| Kernel discovery reconciler | Finds subscribed instances and performs mutual proof-of-possession handshakes | Rust | Planned |
 
 ## Key flows
 
 ### Governed mutation
 
-1. An identified actor submits an idempotent operation through a kernel
-   contract.
-2. The kernel authenticates the actor, checks authority, and validates the
-   operation against current versioned state.
-3. The kernel atomically stores the state change, audit record, promised event,
+1. A service sends a timestamped, signed, idempotent REST operation directly to
+   the kernel/hub.
+2. The kernel verifies the public key, HTTP message signature, content digest,
+   timestamp, nonce, replay state, and database communication-admission flag.
+3. The kernel checks authority and validates current versioned state.
+4. The kernel atomically stores the state change, audit record, promised event,
    and idempotent result.
-4. After commit, subscribed workers can receive or retrieve the typed event and
+5. After commit, subscribed workers can receive or retrieve the typed event and
    safely claim associated work.
 
 ## Data
@@ -99,4 +107,5 @@ Rank the few qualities that drive architectural tradeoffs.
 
 ## Related decisions
 
-- No ADRs recorded yet.
+- [ADR-0003: Use direct signed REST communication](decisions/0003-direct-signed-service-rest.md)
+- [ADR-0005: Use ephemeral per-instance service keys](decisions/0005-use-ephemeral-per-instance-service-keys.md)

@@ -19,9 +19,12 @@ kernel unless it is explicitly marked otherwise.
 
 ## Terms
 
-- **Actor** — an identified human, service, or other principal that requests an
-  operation.
-- **Worker** — an actor that consumes events or claims work for processing.
+- **Service principal** — a backend service admitted to the kernel with a
+  stable identity and one or more registered public keys.
+- **Worker** — a service principal that consumes events or claims work for
+  processing.
+- **External user subject** — optional provenance asserted by an authenticated
+  service; it is not a kernel principal or credential.
 - **Operation** — a command submitted through a kernel contract.
 - **Resource** — a durable object governed by the kernel.
 - **Artifact** — immutable evidence or a result submitted by a worker.
@@ -32,7 +35,7 @@ kernel unless it is explicitly marked otherwise.
 
 | ID | Capability | Minimum requirement |
 | --- | --- | --- |
-| ILK-001 | Identity | Every actor and worker has a stable identity. |
+| ILK-001 | Identity | Every calling service and worker has a stable service identity. |
 | ILK-002 | Authority | The kernel determines whether an identity may perform an operation. |
 | ILK-003 | Resources | Governed objects are durable and have stable, non-reusable IDs. |
 | ILK-004 | Versions | Resources are versioned; accepted history is never silently overwritten. |
@@ -50,19 +53,49 @@ kernel unless it is explicitly marked otherwise.
 
 ### ILK-001: Identity
 
+- Implementation: `src/kernel/identity.rs`
+- Independent contract test: `tests/identity_contract.rs`
+
 Invariants:
 
 - Every non-public operation MUST be attributable to exactly one authenticated
-  actor identity.
+  service identity and verified public key.
+- Every running service instance MUST have a unique instance ID and freshly
+  generated keypair; no private key may be shared with another instance or
+  persisted outside its signing process.
 - Identity IDs MUST remain stable even if display names or credentials change.
-- Worker identities MUST be distinguishable from human and service identities.
+- Worker identities MUST be represented as a service role or profile.
+- The kernel MUST NOT accept user credentials as kernel credentials.
 
 Acceptance criteria:
 
-- A request without valid identity evidence is rejected before governed state
-  is read or changed.
-- A completed operation can be traced back to the stable actor ID that
+- A request without a valid, fresh HTTP message signature from an enabled
+  service is rejected before governed state is read or changed.
+- A completed operation can be traced back to the stable service ID that
   requested it.
+- Restarting a service process creates a new instance ID and key and requires a
+  new proof-of-possession handshake.
+
+Implementation status:
+
+- Complete: stable UUID IDs, service/worker distinction, active and disabled
+  lifecycle, display-name validation, repository contract, and independently
+  testable service behavior.
+- Complete: PostgreSQL identity repository, schema constraints, migration, and
+  restart-durability integration test.
+- Complete: the domain and database schema reject human identities and accept
+  only service and worker principals.
+- Pending: ephemeral per-instance service-key generation, leased public-key
+  registration in a secret manager, kernel-to-subscriber discovery handshake,
+  direct HTTP Message Signature verification, timestamp/nonce replay defense,
+  and database communication admission.
+- Pending: mediation and audit integration that attributes every completed
+  operation to that service and signing key.
+
+See the [direct service protocol](direct-service-protocol.md) and
+[ADR-0003](decisions/0003-direct-signed-service-rest.md).
+Instance key and discovery lifecycle is specified by
+[ADR-0005](decisions/0005-use-ephemeral-per-instance-service-keys.md).
 
 ### ILK-002: Authority
 
@@ -166,7 +199,7 @@ Invariants:
 - Security and governance actions MUST append an audit record in the same
   successful transaction as their governed state change.
 - Audit records MUST NOT be updated or deleted through kernel contracts.
-- Each record MUST include an event type, actor ID, time, operation, target,
+- Each record MUST include an event type, service ID, time, operation, target,
   outcome, and correlation ID.
 
 Acceptance criteria:
@@ -201,6 +234,11 @@ Invariants:
   through kernel contracts.
 - A subscription MUST identify the worker and one or more declared event types.
 - Subscription changes MUST be authorized and audited.
+- Delivery MUST obey the shared readiness/capacity health model without
+  deleting or disabling durable subscription state.
+- Every kernel instance MUST continuously discover reachable instances for
+  active subscriptions and complete a fresh, mutual proof-of-possession
+  handshake before delivering to an instance.
 
 Acceptance criteria:
 
@@ -208,6 +246,10 @@ Acceptance criteria:
   subscriptions and authorization scope.
 - Disabling a subscription prevents new deliveries without deleting its
   history.
+- Saturation, stale health, or lack of capacity pauses delivery and later
+  resumes from the last durable cursor.
+- One unreachable subscriber does not prevent kernel startup or discovery of
+  other subscribers; its delivery remains paused and is retried with backoff.
 
 ### ILK-011: Work claims
 

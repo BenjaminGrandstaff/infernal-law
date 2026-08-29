@@ -25,4 +25,8 @@ They preserve the context and tradeoffs behind a decision.
 
 | ADR | Status | Date |
 | --- | --- | --- |
-| No decisions recorded yet | — | — |
+| [ADR-0001: Separate user and service authentication](0001-separate-user-and-service-authentication.md) | Superseded | 2026-08-28 |
+| [ADR-0002: Use an external Kubernetes service authenticator](0002-external-kubernetes-authenticator.md) | Superseded | 2026-08-28 |
+| [ADR-0003: Use direct signed REST communication](0003-direct-signed-service-rest.md) | Accepted | 2026-08-28 |
+| [ADR-0004: Provision service keys with Kubernetes Secrets](0004-provision-service-keys-with-kubernetes-secrets.md) | Superseded | 2026-08-28 |
+| [ADR-0005: Use ephemeral per-instance service keys](0005-use-ephemeral-per-instance-service-keys.md) | Accepted | 2026-08-28 |

@@ -11,8 +11,10 @@ documents close to the code and update them when the system changes.
    invariants, and acceptance criteria
 3. [Rust source layout](source-layout.md) — independently testable module and
    test boundaries
-4. [Data architecture](data.md) — PostgreSQL and vector-storage foundations
-5. [Architecture decisions](decisions/README.md) — decisions and their
+4. [Direct service protocol](direct-service-protocol.md) — signed REST,
+   database admission, subscriptions, health, and backpressure
+5. [Data architecture](data.md) — PostgreSQL and vector-storage foundations
+6. [Architecture decisions](decisions/README.md) — decisions and their
    rationale
 
 ## Documentation principles
