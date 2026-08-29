@@ -111,6 +111,31 @@ racing to claim the same route produce exactly one winner under the existing
 ILK-011 compare-and-set rules; a scheduler cannot bypass, weaken, or shortcut
 those checks.
 
+### The kernel is the scheduler's only source of state
+
+Moving selection policy out of the kernel does not create a second channel
+between services. The existing rule that services communicate with the
+kernel, not with one another, applies to a scheduler exactly as it applies to
+any worker. A scheduler's every input is therefore an authenticated kernel
+contract:
+
+- the eligible-route query (candidate work);
+- the kernel's relayed health/capacity observation (see the
+  [health model](../direct-service-protocol.md#health-model)) — self-reported
+  by a worker *to the kernel*, never to a scheduler directly, and merely
+  relayed read-only by the kernel; and
+- claim, renewal, release, and completion outcomes.
+
+A scheduler MUST NOT receive its scheduling-relevant state from a worker
+directly, from a separate event bus or message queue, from Kubernetes objects,
+or from a scheduler-local database populated some other way. A scheduler MAY
+still consult non-kernel infrastructure for signals the kernel has no reason
+to own — node inventory, GPU availability, cluster capacity — but never as a
+replacement for kernel-owned request, route, health/capacity relay, or claim
+state. This keeps the kernel the single place every scheduler implementation
+must trust, and keeps a scheduler swappable without a worker ever needing to
+know one exists.
+
 ### Reference implementations
 
 The first scheduler ships as its own project, `infernal-taskmaster-simple` —
@@ -133,10 +158,18 @@ accounting (`accepting_work`, `max_in_flight`, `current_in_flight`,
 kernel's eligibility query does not filter on capacity, and the kernel does
 not implement backpressure timing. A scheduler that ignores a destination's
 reported capacity may still attempt a claim; the kernel's authorization and
-fencing checks are unaffected either way. Deployments MAY still keep a
-disposable health/capacity projection outside the kernel for a scheduler to
-consult, but that projection is scheduler-owned infrastructure, not kernel
-state, and cannot authorize, assign, or fence work.
+fencing checks are unaffected either way.
+
+The worker still submits its signed health/capacity report only to the
+kernel, exactly as every other worker-to-kernel interaction works — it is
+never sent to a scheduler directly. The kernel stores the latest observation
+durably (ADR-0010) and relays it read-only to an authorized scheduler. A
+scheduler MAY cache that kernel-sourced data locally as a disposable read
+replica for its own efficiency, but MUST NOT source it any other way — not
+from the worker directly, not from Kubernetes objects, and not from a
+separately populated store. Whatever a scheduler caches remains scheduler-owned
+infrastructure, not kernel state, and cannot authorize, assign, or fence work;
+it exists only to make the scheduler's already-kernel-sourced read cheaper.
 
 ## Consequences
 

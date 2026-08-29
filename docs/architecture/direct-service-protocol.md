@@ -17,7 +17,7 @@ Service state is deliberately separated into independent dimensions:
 | Subscription | Active event-type interests | Service through signed REST API | Which committed events it requests |
 | Liveness | Alive or dead | Health evaluator/Kubernetes | Whether the process needs restart |
 | Readiness | Ready or not ready | Health evaluator/Kubernetes | Whether the process should receive traffic |
-| Capacity | Available, saturated, or draining | Self-reported by the service; consumed by an external scheduler | How much new event/work delivery it can accept |
+| Capacity | Available, saturated, or draining | Self-reported by the service to the kernel; relayed read-only to an external scheduler | How much new event/work delivery it can accept |
 
 No dimension implicitly changes another. In particular:
 
@@ -329,11 +329,16 @@ derive from the same internal health snapshot so they cannot disagree about
 whether the service is accepting new work. The liveness check remains
 intentionally minimal; overload alone MUST NOT cause restart loops.
 
-Per [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md),
-the kernel itself does not consume the capacity report to gate delivery — it
-is scheduler-facing input. The kernel's own eligibility gate and an external
-scheduler's backpressure policy are deliberately separate concerns, covered
-next.
+The signed health/capacity report is submitted to the kernel, never to a
+scheduler or any other service directly — a service still only ever
+communicates with the kernel. The kernel durably stores the latest observation
+per instance (see [ADR-0010](decisions/0010-use-postgresql-as-the-only-kernel-state-store.md)'s
+required-state list) and exposes it read-only through an authenticated
+kernel query. Per [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md),
+the kernel itself does not consume the report to gate delivery — it is
+scheduler-facing input, relayed by the kernel rather than acted on by it. The
+kernel's own eligibility gate and an external scheduler's backpressure policy
+are deliberately separate concerns, covered next.
 
 ## Kernel eligibility gate
 
@@ -365,6 +370,16 @@ service_is_ready
 AND health_report_is_fresh
 AND available_capacity > 0
 ```
+
+Every term above is read from the kernel's relayed health/capacity state, not
+from the worker service directly and not from any other event source (a
+separate message bus, Kubernetes objects, or a scheduler-local database). The
+kernel is the scheduler's only source of registered state: eligible routes,
+relayed health/capacity observations, and claim outcomes all come from
+authenticated kernel contracts. A scheduler that needs additional signals
+(node inventory, GPU availability) may consult its own infrastructure for
+those, but never as a substitute for kernel-owned request, route, or claim
+state.
 
 Backpressure behavior:
 

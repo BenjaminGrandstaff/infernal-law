@@ -49,7 +49,9 @@ kernel unless it is explicitly marked otherwise.
   on which worker or node. It owns optimization policy (ordering, priority,
   affinity, resource-class placement, capacity, backpressure timing, retry
   timing); it holds no elevated database access and cannot bypass claim
-  arbitration. See
+  arbitration. The kernel is its only source of registered request, route,
+  health/capacity-relay, and claim state — a scheduler never receives that
+  state from a worker directly or from any other event source. See
   [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md).
 - **External user subject** — optional provenance asserted by an authenticated
   service; it is not a kernel principal or credential.
