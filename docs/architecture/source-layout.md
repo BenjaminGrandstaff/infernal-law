@@ -21,6 +21,7 @@ src/
     ├── mod.rs              # capability registry and registry tests
     ├── requirement.rs      # shared requirement metadata
     ├── identity.rs         # ILK-001
+    ├── instance_keys.rs    # ephemeral per-process identity keys
     ├── authority.rs        # ILK-002
     ├── resources.rs        # ILK-003
     ├── versions.rs         # ILK-004
@@ -38,6 +39,8 @@ tests/
 ├── database_connection.rs  # opt-in live PostgreSQL test
 ├── http_contract.rs        # independently runnable public HTTP test
 ├── identity_contract.rs    # independently runnable ILK-001 contract
+├── instance_keys_contract.rs
+│                            # per-instance key isolation/signature contract
 ├── kernel_requirements.rs  # independently runnable public kernel test
 └── postgres_identity_repository.rs
                              # opt-in ILK-001 durability test
@@ -61,6 +64,7 @@ Run one integration-test file as its own test target:
 ```sh
 cargo test --test http_contract
 cargo test --test identity_contract
+cargo test --test instance_keys_contract
 cargo test --test kernel_requirements
 ```
 
@@ -68,6 +72,7 @@ Run the live database wiring test after starting the pgvector container:
 
 ```sh
 export DATABASE_URL='postgres://infernal_law:YOUR_PASSWORD@127.0.0.1:5432/infernal_law'
+export INFERNAL_LAW_SERVICE_ID='00000000-0000-4000-8000-000000000001'
 cargo test --test database_connection -- --ignored
 cargo test --test postgres_identity_repository -- --ignored
 ```

@@ -85,10 +85,12 @@ Implementation status:
   restart-durability integration test.
 - Complete: the domain and database schema reject human identities and accept
   only service and worker principals.
-- Pending: ephemeral per-instance service-key generation, leased public-key
-  registration in a secret manager, kernel-to-subscriber discovery handshake,
-  direct HTTP Message Signature verification, timestamp/nonce replay defense,
-  and database communication admission.
+- Complete: unique per-process instance and key IDs, ephemeral Ed25519 signing
+  keys, public verification records, and process-wide application wiring.
+- Pending: leased public-key registration in a secret manager,
+  kernel-to-subscriber discovery handshake, direct HTTP Message Signature
+  verification, timestamp/nonce replay defense, and database communication
+  admission.
 - Pending: mediation and audit integration that attributes every completed
   operation to that service and signing key.
 

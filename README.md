@@ -20,6 +20,7 @@ URL:
 
 ```sh
 export DATABASE_URL='postgres://infernal_law:YOUR_PASSWORD@127.0.0.1:5432/infernal_law'
+export INFERNAL_LAW_SERVICE_ID='00000000-0000-4000-8000-000000000001'
 cargo run
 ```
 
@@ -30,10 +31,11 @@ It listens on `0.0.0.0:8080` by default and provides:
 - `GET /health/ready`
 
 Set `BIND_ADDRESS` or `PORT` to change the listener configuration. Startup
-fails if `DATABASE_URL` is absent, PostgreSQL cannot be reached, or the
-`vector` extension is unavailable. The readiness endpoint also checks the
-database connection. Startup applies the idempotent schema migrations in
-[`migrations/`](migrations/) before accepting requests.
+fails if `DATABASE_URL` or `INFERNAL_LAW_SERVICE_ID` is absent, the service ID
+is not a UUID, PostgreSQL cannot be reached, or the `vector` extension is
+unavailable. The readiness endpoint also checks the database connection.
+Startup applies the idempotent schema migrations in [`migrations/`](migrations/)
+before accepting requests.
 
 The kernel is split into independently testable capability modules. See the
 [Rust source layout](docs/architecture/source-layout.md) for targeted test
@@ -53,6 +55,7 @@ After starting PostgreSQL as described below, run the application:
 ```sh
 podman run --rm --name infernal-law --network infernal-law -p 8080:8080 \
   --env DATABASE_URL='postgres://infernal_law:YOUR_PASSWORD@infernal-law-postgres:5432/infernal_law' \
+  --env INFERNAL_LAW_SERVICE_ID='00000000-0000-4000-8000-000000000001' \
   localhost/infernal-law:latest
 ```
 

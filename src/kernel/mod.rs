@@ -8,6 +8,7 @@ pub mod decisions;
 pub mod events;
 pub mod idempotency;
 pub mod identity;
+pub mod instance_keys;
 pub mod mediation;
 pub mod relationships;
 mod requirement;

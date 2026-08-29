@@ -1,28 +1,43 @@
 //! Goal: construct the process-wide adapters and kernel services in one place
 //! so transports receive ready-to-use dependencies rather than creating them.
 
+use std::env;
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
+use std::sync::Arc;
+
 use crate::infrastructure::database::{Database, DatabaseError};
 use crate::infrastructure::postgres_identity_repository::PostgresIdentityRepository;
-use crate::kernel::identity::IdentityService;
+use crate::kernel::identity::{ActorId, IdentityService};
+use crate::kernel::instance_keys::{InstanceCredential, InstancePublicKey, InstanceSignature};
+
+pub const SERVICE_ID_ENV: &str = "INFERNAL_LAW_SERVICE_ID";
 
 #[derive(Clone)]
 pub struct Application {
     database: Database,
     identities: IdentityService<PostgresIdentityRepository>,
+    instance_credential: Arc<InstanceCredential>,
 }
 
 impl Application {
-    pub fn from_env() -> Result<Self, DatabaseError> {
-        Self::new(Database::connect_from_env()?)
+    pub fn from_env() -> Result<Self, WiringError> {
+        let service_id = env::var(SERVICE_ID_ENV)
+            .map_err(|_| WiringError::MissingEnvironment(SERVICE_ID_ENV))?
+            .parse()
+            .map_err(WiringError::InvalidServiceId)?;
+        Self::new(Database::connect_from_env()?, service_id)
     }
 
-    pub fn new(database: Database) -> Result<Self, DatabaseError> {
+    pub fn new(database: Database, service_id: ActorId) -> Result<Self, WiringError> {
         database.migrate()?;
         let identities = IdentityService::new(PostgresIdentityRepository::new(database.clone()));
+        let instance_credential = Arc::new(InstanceCredential::generate(service_id));
 
         Ok(Self {
             database,
             identities,
+            instance_credential,
         })
     }
 
@@ -32,5 +47,40 @@ impl Application {
 
     pub const fn identities(&self) -> &IdentityService<PostgresIdentityRepository> {
         &self.identities
+    }
+
+    pub fn instance_public_key(&self) -> &InstancePublicKey {
+        self.instance_credential.public_key()
+    }
+
+    pub fn sign_as_instance(&self, message: &[u8]) -> InstanceSignature {
+        self.instance_credential.sign(message)
+    }
+}
+
+#[derive(Debug)]
+pub enum WiringError {
+    Database(DatabaseError),
+    InvalidServiceId(crate::kernel::identity::IdentityError),
+    MissingEnvironment(&'static str),
+}
+
+impl Display for WiringError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Database(error) => Display::fmt(error, formatter),
+            Self::InvalidServiceId(error) => Display::fmt(error, formatter),
+            Self::MissingEnvironment(name) => {
+                write!(formatter, "required environment variable {name} is not set")
+            }
+        }
+    }
+}
+
+impl Error for WiringError {}
+
+impl From<DatabaseError> for WiringError {
+    fn from(value: DatabaseError) -> Self {
+        Self::Database(value)
     }
 }

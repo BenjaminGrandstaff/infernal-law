@@ -8,9 +8,18 @@ use infernal_law::kernel::identity::{
 use infernal_law::wiring::Application;
 
 #[test]
-#[ignore = "requires DATABASE_URL and a running PostgreSQL instance with pgvector"]
+#[ignore = "requires DATABASE_URL, INFERNAL_LAW_SERVICE_ID, and PostgreSQL with pgvector"]
 fn identity_survives_repository_restart_without_reusing_or_changing_its_id() {
     let first_process = Application::from_env().expect("first process should connect and migrate");
+    let first_instance = first_process.instance_public_key().clone();
+    let same_process_handle = first_process.clone();
+    assert_eq!(
+        same_process_handle.instance_public_key().instance_id(),
+        first_instance.instance_id(),
+        "threads in one process must share its one instance credential"
+    );
+    drop(same_process_handle);
+
     let created = first_process
         .identities()
         .create(ActorKind::Worker, "Durable identity")
@@ -19,6 +28,16 @@ fn identity_survives_repository_restart_without_reusing_or_changing_its_id() {
     drop(first_process);
 
     let second_process = Application::from_env().expect("second process should reconnect");
+    assert_eq!(
+        second_process.instance_public_key().service_id(),
+        first_instance.service_id(),
+        "the configured service ID must remain stable"
+    );
+    assert_ne!(
+        second_process.instance_public_key().instance_id(),
+        first_instance.instance_id(),
+        "a new process must receive a new instance credential"
+    );
     let restored = second_process
         .identities()
         .resolve_active(id)
