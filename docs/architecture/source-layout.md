@@ -18,6 +18,8 @@ src/
 │   ├── database.rs         # pooled PostgreSQL and pgvector wiring
 │   ├── kubernetes_token_reviewer.rs
 │   │                        # bootstrap TokenReview adapter
+│   ├── postgres_admission_repository.rs
+│   │                        # read-only communication admission check
 │   ├── postgres_enrollment_binding_repository.rs
 │   │                        # workload mappings and one-time challenges
 │   ├── postgres_identity_repository.rs
@@ -36,6 +38,7 @@ src/
 └── kernel/
     ├── mod.rs              # capability registry and registry tests
     ├── requirement.rs      # shared requirement metadata
+    ├── admission.rs        # independent default-deny communication gate
     ├── identity.rs         # ILK-001
     ├── instance_keys.rs    # ephemeral per-process identity keys
     ├── instance_registry.rs
@@ -79,6 +82,7 @@ tests/
 │                            # isolated signed-HTTP verification contract
 ├── replay_protection_contract.rs
 │                            # isolated atomic replay/safe-retry contract
+├── admission_contract.rs   # isolated default-deny admission contract
 ├── kernel_requirements.rs  # independently runnable public kernel test
 ├── postgres_identity_repository.rs
 │                            # opt-in ILK-001 durability test
@@ -90,6 +94,8 @@ tests/
 │                            # opt-in discovery/handshake persistence test
 ├── postgres_replay_protection.rs
 │                            # opt-in replay persistence/guard test
+├── postgres_communication_admission.rs
+│                            # opt-in admission administration/history test
 └── postgres_instance_registry.rs
                              # opt-in public-key/lease durability test
 ```
@@ -121,6 +127,7 @@ cargo test --test subscription_contract
 cargo test --test handshake_reconciler_contract
 cargo test --test service_request_signature_contract
 cargo test --test replay_protection_contract
+cargo test --test admission_contract
 cargo test --test kernel_requirements
 ```
 
@@ -136,6 +143,7 @@ cargo test --test postgres_enrollment_bindings -- --ignored
 cargo test --test postgres_subscription_repository -- --ignored
 cargo test --test postgres_handshake_reconciler -- --ignored
 cargo test --test postgres_replay_protection -- --ignored
+cargo test --test postgres_communication_admission -- --ignored
 ```
 
 Run the complete suite before merging:

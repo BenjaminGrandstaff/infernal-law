@@ -197,6 +197,22 @@ The kernel and normal services read the attribute but cannot modify it through
 ordinary service operations. A disabled service receives a deterministic
 admission rejection even if its key and health are valid.
 
+The PostgreSQL admission store and read-only kernel check are implemented. New
+identity rows automatically receive `communication_enabled = false` at
+revision zero. Changes use a fixed security-definer administration function
+that locks one service record, reserves a service-scoped correlation ID, and
+atomically writes state plus immutable history. Replaying the same correlation
+and parameters returns its original result; changing parameters under an
+existing correlation is rejected. A new request for the current state appends
+an explicit `no_op` outcome without increasing the state revision. Concurrent
+retries converge on one history entry.
+
+The function has no `PUBLIC` execute grant, and direct updates/deletes are
+guarded. Deployment must grant execute only to a separate administration role;
+the normal kernel role needs `SELECT` only. No Rust kernel contract or public
+HTTP route can enable communication. A dedicated administration program and
+production migration/runtime role split remain deployment work.
+
 ## Subscriptions
 
 An admitted and authorized service manages subscriptions through signed REST

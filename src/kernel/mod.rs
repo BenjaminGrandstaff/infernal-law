@@ -1,6 +1,7 @@
 //! Goal: define the minimum kernel's capability boundaries and provide one
 //! traceable registry for requirements ILK-001 through ILK-013.
 
+pub mod admission;
 pub mod artifacts;
 pub mod audit;
 pub mod authority;

@@ -97,8 +97,11 @@ Implementation status:
 - Complete: atomic PostgreSQL nonce-digest consumption, permanent
   service/request-ID fingerprint binding, safe-retry classification, conflict
   rejection, and append-only accepted/rejected replay audit.
-- Pending: signed lease-renewal transport, transport middleware for governed
-  routes, and database communication admission.
+- Complete: separate default-deny PostgreSQL communication admission, a
+  read-only kernel check, idempotent out-of-band administrative changes, direct
+  mutation guards, and immutable old/new state history.
+- Pending: signed lease-renewal transport and transport middleware composing
+  signature, replay, and admission checks for governed routes.
 - Pending: mediation and audit integration that attributes every completed
   operation to that service and signing key.
 

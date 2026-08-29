@@ -46,6 +46,9 @@ Migration 0005 creates append-preserving per-kernel handshake challenges,
 successful handshake history, freshness indexes, and handshake audit records.
 Migration 0006 creates immutable service/request-ID fingerprint bindings,
 key-scoped nonce-digest reservations, and append-only replay outcome audit.
+Migration 0007 creates default-deny communication admission, automatic
+one-to-one records for every stable service identity, idempotent administrative
+changes, and append-only admission history.
 Applied migration versions are recorded in `kernel_schema_migrations`.
 
 The `PostgresIdentityRepository` adapter implements the identity module's
@@ -80,6 +83,16 @@ signed request with the same ID and fingerprint is classified as a safe retry
 for ILK-012; a repeated nonce is rejected as wire replay, and the same request
 ID with different content is rejected as a conflict. Fresh, safe-retry, replay,
 and conflict outcomes are appended to protected audit history.
+
+Communication admission is separate from identity lifecycle, credentials,
+health, and subscriptions. The Rust kernel has a fixed read-only repository
+contract and cannot toggle admission. PostgreSQL exposes one fixed,
+transactional `set_service_communication_admission` administration function;
+`PUBLIC` cannot execute it, direct row updates are trigger-rejected, and every
+new correlation ID appends old/new state, administrator identity, reason,
+revision, outcome, and commit time. Production deployment must grant function
+execution only to a distinct administration database role and use a separate
+non-owner runtime role for the kernel.
 
 ## Vector storage
 

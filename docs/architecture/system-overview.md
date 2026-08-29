@@ -65,6 +65,7 @@ known.
 | Kernel discovery reconciler | Finds subscribed instances and performs per-kernel mutual proof-of-possession handshakes | Rust/PostgreSQL | Implemented; outbound HTTP transport pending |
 | Service request verifier | Verifies the fixed signed-HTTP profile against eligible registry keys and returns typed caller context | Rust | Implemented; admission middleware pending |
 | Replay protector | Atomically consumes key-scoped nonce digests and binds stable request IDs to semantic request fingerprints | Rust/PostgreSQL | Implemented; idempotent result storage pending |
+| Communication admission | Independently stores default-deny service communication state and immutable administrative history | Rust/PostgreSQL | Read gate and database administration function implemented; HTTP composition pending |
 
 ## Key flows
 

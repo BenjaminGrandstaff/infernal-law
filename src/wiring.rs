@@ -7,6 +7,7 @@ use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 
 use crate::infrastructure::database::{Database, DatabaseError};
+use crate::infrastructure::postgres_admission_repository::PostgresAdmissionRepository;
 use crate::infrastructure::postgres_enrollment_binding_repository::PostgresEnrollmentBindingRepository;
 use crate::infrastructure::postgres_handshake_repository::PostgresHandshakeRepository;
 use crate::infrastructure::postgres_identity_repository::PostgresIdentityRepository;
@@ -14,6 +15,7 @@ use crate::infrastructure::postgres_instance_registry::PostgresInstanceRegistry;
 use crate::infrastructure::postgres_replay_protection_repository::PostgresReplayProtectionRepository;
 use crate::infrastructure::postgres_subscribed_instance_discovery::PostgresSubscribedInstanceDiscovery;
 use crate::infrastructure::postgres_subscription_repository::PostgresSubscriptionRepository;
+use crate::kernel::admission::AdmissionService;
 use crate::kernel::enrollment::{EnrollmentService, WorkloadTokenReviewer};
 use crate::kernel::handshakes::{HandshakeReconciler, HandshakeTransport};
 use crate::kernel::identity::{ActorId, IdentityService};
@@ -28,6 +30,7 @@ pub const SERVICE_ID_ENV: &str = "INFERNAL_LAW_SERVICE_ID";
 #[derive(Clone)]
 pub struct Application {
     database: Database,
+    admission: AdmissionService<PostgresAdmissionRepository>,
     identities: IdentityService<PostgresIdentityRepository>,
     instance_credential: Arc<InstanceCredential>,
     instance_registry: InstanceRegistryService<PostgresInstanceRegistry>,
@@ -47,6 +50,7 @@ impl Application {
     pub fn new(database: Database, service_id: ActorId) -> Result<Self, WiringError> {
         database.migrate()?;
         let identities = IdentityService::new(PostgresIdentityRepository::new(database.clone()));
+        let admission = AdmissionService::new(PostgresAdmissionRepository::new(database.clone()));
         let instance_credential = Arc::new(InstanceCredential::generate(service_id));
         let instance_registry = InstanceRegistryService::new(
             PostgresInstanceRegistry::new(database.clone()),
@@ -59,6 +63,7 @@ impl Application {
 
         Ok(Self {
             database,
+            admission,
             identities,
             instance_credential,
             instance_registry,
@@ -69,6 +74,10 @@ impl Application {
 
     pub const fn database(&self) -> &Database {
         &self.database
+    }
+
+    pub const fn admission(&self) -> &AdmissionService<PostgresAdmissionRepository> {
+        &self.admission
     }
 
     pub const fn identities(&self) -> &IdentityService<PostgresIdentityRepository> {
