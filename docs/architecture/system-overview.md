@@ -49,6 +49,11 @@ work from process memory or a local filesystem.
   scheduler service — see
   [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md) and
   the reference `infernal-taskmaster-simple` implementation.
+- Non-Rust language bindings and in-process linking of kernel code. Every
+  caller, in every language, reaches the kernel only over the signed REST
+  contract from ADR-0003 — see
+  [ADR-0012](decisions/0012-rust-first-client-sdk-family-over-signed-rest.md)
+  and the `infernal-client-*` repositories.
 - Capabilities beyond the documented [minimum viable kernel](minimum-viable-kernel.md)
   until they are separately specified
 
