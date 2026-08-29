@@ -8,6 +8,8 @@ use std::thread;
 
 use crate::wiring::Application;
 
+pub mod enrollment_dto;
+
 const DEFAULT_ADDRESS: &str = "0.0.0.0";
 const DEFAULT_PORT: &str = "8080";
 

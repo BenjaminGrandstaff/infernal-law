@@ -170,7 +170,7 @@ impl EnrollmentRequest {
         claimed_pod_uid: &str,
         workload_token: String,
     ) -> Result<Self, EnrollmentError> {
-        let endpoint = validate_field(endpoint, 2048)?;
+        let endpoint = validate_endpoint(endpoint)?;
         let claimed_pod_uid = validate_field(claimed_pod_uid, MAX_UID_LENGTH)?;
         if workload_token.is_empty() || workload_token.len() > MAX_TOKEN_LENGTH {
             return Err(EnrollmentError::InvalidField);
@@ -194,12 +194,55 @@ impl EnrollmentRequest {
         })
     }
 
+    pub fn restore(
+        challenge: EnrollmentChallenge,
+        public_key: InstancePublicKey,
+        endpoint: &str,
+        claimed_pod_uid: &str,
+        workload_token: String,
+        signature: InstanceSignature,
+    ) -> Result<Self, EnrollmentError> {
+        let endpoint = validate_endpoint(endpoint)?;
+        let claimed_pod_uid = validate_field(claimed_pod_uid, MAX_UID_LENGTH)?;
+        if workload_token.is_empty() || workload_token.len() > MAX_TOKEN_LENGTH {
+            return Err(EnrollmentError::InvalidField);
+        }
+        Ok(Self {
+            challenge,
+            public_key,
+            endpoint,
+            claimed_pod_uid,
+            workload_token,
+            signature,
+        })
+    }
+
+    pub(crate) fn into_transport_parts(self) -> EnrollmentTransportParts {
+        EnrollmentTransportParts {
+            challenge: self.challenge,
+            public_key: self.public_key,
+            endpoint: self.endpoint,
+            claimed_pod_uid: self.claimed_pod_uid,
+            workload_token: self.workload_token,
+            signature: self.signature,
+        }
+    }
+
     pub fn public_key(&self) -> &InstancePublicKey {
         &self.public_key
     }
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
+}
+
+pub(crate) struct EnrollmentTransportParts {
+    pub challenge: EnrollmentChallenge,
+    pub public_key: InstancePublicKey,
+    pub endpoint: String,
+    pub claimed_pod_uid: String,
+    pub workload_token: String,
+    pub signature: InstanceSignature,
 }
 
 pub trait WorkloadTokenReviewer: Send + Sync {
@@ -354,6 +397,14 @@ fn validate_field(value: &str, max: usize) -> Result<String, EnrollmentError> {
         return Err(EnrollmentError::InvalidField);
     }
     Ok(value.to_owned())
+}
+
+fn validate_endpoint(value: &str) -> Result<String, EnrollmentError> {
+    let endpoint = validate_field(value, 2048)?;
+    if endpoint == "https://" || !endpoint.starts_with("https://") {
+        return Err(EnrollmentError::InvalidField);
+    }
+    Ok(endpoint)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

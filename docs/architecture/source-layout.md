@@ -11,6 +11,8 @@ src/
 ├── main.rs                 # thin executable entry point
 ├── lib.rs                  # public library boundary
 ├── http.rs                 # HTTP transport and colocated unit tests
+├── http/
+│   └── enrollment_dto.rs   # strict initial-enrollment JSON profile
 ├── infrastructure/
 │   ├── mod.rs              # external-system adapter boundary
 │   ├── database.rs         # pooled PostgreSQL and pgvector wiring
@@ -53,6 +55,8 @@ tests/
 ├── instance_registry_contract.rs
 │                            # independently runnable lease-state contract
 ├── enrollment_contract.rs  # independently runnable enrollment policy
+├── enrollment_json_contract.rs
+│                            # independently runnable JSON DTO contract
 ├── kernel_requirements.rs  # independently runnable public kernel test
 ├── postgres_identity_repository.rs
 │                            # opt-in ILK-001 durability test
@@ -83,6 +87,7 @@ cargo test --test identity_contract
 cargo test --test instance_keys_contract
 cargo test --test instance_registry_contract
 cargo test --test enrollment_contract
+cargo test --test enrollment_json_contract
 cargo test --test kernel_requirements
 ```
 

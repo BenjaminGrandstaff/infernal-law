@@ -89,6 +89,19 @@ namespace, ServiceAccount, and ServiceAccount UID to the stable service ID.
 Only then does the kernel register the public key and lease. See
 [ADR-0008](decisions/0008-use-kubernetes-tokenreview-for-initial-enrollment.md).
 
+### Initial-enrollment JSON profile
+
+The enrollment transport uses typed JSON DTOs. UUIDs and HTTPS endpoints are
+JSON strings. The 32-byte challenge, 32-byte Ed25519 public key, and 64-byte
+signature use RFC 4648 URL-safe base64 without padding. The algorithm value is
+exactly `ed25519`; unknown JSON fields, malformed UUIDs, other algorithms,
+incorrect binary lengths, and non-canonical encodings are rejected.
+
+The submission DTO contains the projected ServiceAccount bearer token and
+therefore deliberately has no debug representation. Public error DTOs collapse
+authentication failures to `enrollment_rejected` and infrastructure failures
+to `internal_error`; neither tokens nor repository messages cross the wire.
+
 ## Verification order
 
 For every non-public request, the kernel MUST:

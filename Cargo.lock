@@ -531,11 +531,13 @@ dependencies = [
 name = "infernal-law"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "ed25519-dalek",
  "getrandom 0.4.3",
  "r2d2_postgres",
  "reqwest",
  "serde",
+ "serde_json",
  "sha2",
  "uuid",
 ]
