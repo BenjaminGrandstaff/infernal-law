@@ -40,6 +40,8 @@ identity table and its constraints. Migration 0002 creates service-instance,
 immutable public-key, bounded lease, and append-only registry-audit storage.
 Migration 0003 creates disabled-by-default Kubernetes workload bindings and
 hashed, expiring, single-use initial-enrollment challenges.
+Migration 0004 creates stable-service subscriptions, one-active-event
+uniqueness, immutable disabled history, and append-only subscription audit.
 Applied migration versions are recorded in `kernel_schema_migrations`.
 
 The `PostgresIdentityRepository` adapter implements the identity module's
@@ -50,9 +52,9 @@ identity state across new application connections.
 The minimum kernel requires durable records for identities, authority,
 resources and versions, typed relationships, artifacts, decisions, audit,
 events, subscriptions, work claims, and idempotency results. Logical and
-physical schemas remain design work; their constraints must enforce the
-[kernel invariants](minimum-viable-kernel.md), not merely represent the happy
-path.
+physical schemas for the remaining capabilities are design work; their
+constraints must enforce the [kernel invariants](minimum-viable-kernel.md), not
+merely represent the happy path.
 
 The service credential schema stores public-key fingerprints,
 public-key bytes, algorithms, instance and boot IDs, bounded lease revisions
@@ -60,9 +62,9 @@ and expiry, activation/revocation state, enrollment provenance, and handshake
 results. PostgreSQL is authoritative for this kernel-managed registry. The
 repository, initial Kubernetes TokenReview enrollment contract, application
 wiring, and bounded JSON enrollment submission route are implemented; outbound
-challenge delivery and renewal authentication remain pending. Private signing keys are not
-database or Kubernetes Secret data: each service process generates its own key
-and retains it only for that process lifetime. See
+challenge delivery and renewal authentication remain pending. Private signing
+keys are not database or Kubernetes Secret data: each service process generates
+its own key and retains it only for that process lifetime. See
 [ADR-0006](decisions/0006-store-instance-public-keys-in-postgresql.md).
 Initial enrollment is defined by
 [ADR-0008](decisions/0008-use-kubernetes-tokenreview-for-initial-enrollment.md).

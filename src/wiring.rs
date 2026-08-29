@@ -10,10 +10,12 @@ use crate::infrastructure::database::{Database, DatabaseError};
 use crate::infrastructure::postgres_enrollment_binding_repository::PostgresEnrollmentBindingRepository;
 use crate::infrastructure::postgres_identity_repository::PostgresIdentityRepository;
 use crate::infrastructure::postgres_instance_registry::PostgresInstanceRegistry;
+use crate::infrastructure::postgres_subscription_repository::PostgresSubscriptionRepository;
 use crate::kernel::enrollment::{EnrollmentService, WorkloadTokenReviewer};
 use crate::kernel::identity::{ActorId, IdentityService};
 use crate::kernel::instance_keys::{InstanceCredential, InstancePublicKey, InstanceSignature};
 use crate::kernel::instance_registry::{InstanceRegistryService, LeasePolicy};
+use crate::kernel::subscriptions::SubscriptionService;
 
 pub const SERVICE_ID_ENV: &str = "INFERNAL_LAW_SERVICE_ID";
 
@@ -23,6 +25,7 @@ pub struct Application {
     identities: IdentityService<PostgresIdentityRepository>,
     instance_credential: Arc<InstanceCredential>,
     instance_registry: InstanceRegistryService<PostgresInstanceRegistry>,
+    subscriptions: SubscriptionService<PostgresSubscriptionRepository>,
 }
 
 impl Application {
@@ -42,12 +45,15 @@ impl Application {
             PostgresInstanceRegistry::new(database.clone()),
             LeasePolicy::default(),
         );
+        let subscriptions =
+            SubscriptionService::new(PostgresSubscriptionRepository::new(database.clone()));
 
         Ok(Self {
             database,
             identities,
             instance_credential,
             instance_registry,
+            subscriptions,
         })
     }
 
@@ -69,6 +75,10 @@ impl Application {
 
     pub const fn instance_registry(&self) -> &InstanceRegistryService<PostgresInstanceRegistry> {
         &self.instance_registry
+    }
+
+    pub const fn subscriptions(&self) -> &SubscriptionService<PostgresSubscriptionRepository> {
+        &self.subscriptions
     }
 
     pub fn enrollment_service<A>(

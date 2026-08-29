@@ -114,7 +114,9 @@ impl Database {
                 "\n",
                 include_str!("../../migrations/0002_instance_public_key_registry.sql"),
                 "\n",
-                include_str!("../../migrations/0003_service_enrollment_bindings.sql")
+                include_str!("../../migrations/0003_service_enrollment_bindings.sql"),
+                "\n",
+                include_str!("../../migrations/0004_subscriptions.sql")
             ))
             .map_err(DatabaseError::Query)
     }

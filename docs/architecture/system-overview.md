@@ -61,6 +61,7 @@ known.
 | Instance key agent | Generates a unique in-process keypair and registers only the leased public record through the kernel | Rust/kernel REST API | Partial |
 | Initial enrollment verifier | Binds key possession to Kubernetes TokenReview and an enabled workload mapping | Rust/Kubernetes/PostgreSQL | Implemented |
 | Instance registry | Owns public keys, bounded leases, and registration history | Rust/PostgreSQL | Implemented |
+| Subscription registry | Owns typed stable-service event interests and immutable disabled history | Rust/PostgreSQL | Implemented; REST pending |
 | Kernel discovery reconciler | Finds subscribed instances and performs mutual proof-of-possession handshakes | Rust | Planned |
 
 ## Key flows

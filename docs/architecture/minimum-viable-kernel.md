@@ -233,6 +233,9 @@ Acceptance criteria:
 
 ### ILK-010: Subscriptions
 
+- Implementation: `src/kernel/subscriptions.rs`
+- Independent contract test: `tests/subscription_contract.rs`
+
 Invariants:
 
 - A worker MUST be able to create, inspect, and disable its subscriptions
@@ -255,6 +258,15 @@ Acceptance criteria:
   resumes from the last durable cursor.
 - One unreachable subscriber does not prevent kernel startup or discovery of
   other subscribers; its delivery remains paused and is retried with backoff.
+
+Implementation status:
+
+- Complete: typed subscription UUIDs and event types; stable-service ownership;
+  durable create, history list, active list, and disable contracts; one-active
+  subscription uniqueness; append-only create/disable audit; protected disabled
+  history; PostgreSQL adapter; and isolated plus live persistence tests.
+- Pending: signed REST operations, ILK-002 authorization integration, delivery
+  cursors, discovery/handshake reconciliation, and capacity-aware delivery.
 
 ### ILK-011: Work claims
 

@@ -22,8 +22,10 @@ src/
 │   │                        # workload mappings and one-time challenges
 │   ├── postgres_identity_repository.rs
 │                            # PostgreSQL ILK-001 adapter
-│   └── postgres_instance_registry.rs
+│   ├── postgres_instance_registry.rs
 │                            # public keys, leases, revocation, audit
+│   └── postgres_subscription_repository.rs
+│                            # ILK-010 persistence and append-only audit
 ├── wiring.rs               # process dependency construction
 └── kernel/
     ├── mod.rs              # capability registry and registry tests
@@ -41,7 +43,7 @@ src/
     ├── decisions.rs        # ILK-007
     ├── audit.rs            # ILK-008
     ├── events.rs           # ILK-009
-    ├── subscriptions.rs    # ILK-010
+    ├── subscriptions.rs    # typed ILK-010 lifecycle contract
     ├── work_claims.rs      # ILK-011
     ├── idempotency.rs      # ILK-012
     └── mediation.rs        # ILK-013
@@ -59,11 +61,15 @@ tests/
 │                            # independently runnable JSON DTO contract
 ├── enrollment_http_contract.rs
 │                            # independently runnable POST handler contract
+├── subscription_contract.rs
+│                            # independently runnable ILK-010 contract
 ├── kernel_requirements.rs  # independently runnable public kernel test
 ├── postgres_identity_repository.rs
 │                            # opt-in ILK-001 durability test
 ├── postgres_enrollment_bindings.rs
 │                            # opt-in enrollment persistence test
+├── postgres_subscription_repository.rs
+│                            # opt-in ILK-010 durability/history test
 └── postgres_instance_registry.rs
                              # opt-in public-key/lease durability test
 ```
@@ -91,6 +97,7 @@ cargo test --test instance_registry_contract
 cargo test --test enrollment_contract
 cargo test --test enrollment_json_contract
 cargo test --test enrollment_http_contract
+cargo test --test subscription_contract
 cargo test --test kernel_requirements
 ```
 
@@ -103,6 +110,7 @@ cargo test --test database_connection -- --ignored
 cargo test --test postgres_identity_repository -- --ignored
 cargo test --test postgres_instance_registry -- --ignored
 cargo test --test postgres_enrollment_bindings -- --ignored
+cargo test --test postgres_subscription_repository -- --ignored
 ```
 
 Run the complete suite before merging:

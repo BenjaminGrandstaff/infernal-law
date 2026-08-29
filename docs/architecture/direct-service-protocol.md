@@ -178,6 +178,12 @@ is paused for backpressure, the subscription remains active and its cursor does
 not advance until delivery is durably accepted under the chosen delivery
 protocol.
 
+The typed subscription domain and PostgreSQL repository are implemented.
+Subscriptions belong to stable service IDs rather than process instance IDs.
+Disabling sets an immutable timestamp and retains history; a later subscription
+for the same event type receives a new subscription ID. Signed REST operations,
+authorization, and delivery cursors remain pending.
+
 ## Health model
 
 The service and hub use one underlying health evaluation with distinct views:
