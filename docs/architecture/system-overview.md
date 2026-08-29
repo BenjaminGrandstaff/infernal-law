@@ -58,8 +58,9 @@ known.
 | Container image | Packages the service as a non-root process | Podman/OCI | `Containerfile` |
 | Database | Stores relational and vector data | PostgreSQL 17 with pgvector | `containers/postgres/` |
 | Runtime deployment | Runs and exposes the service | Kubernetes | `k8s/base/` |
-| Instance key agent | Generates a unique in-process keypair and registers only the leased public record through the kernel | Rust/kernel REST API | Partial |
-| Instance registry | Owns public keys, bounded leases, and registration history | Rust/PostgreSQL | Planned |
+| Instance key agent | Generates a unique in-process keypair and registers only the leased public record through the kernel | Rust/kernel contract; REST pending | Partial |
+| Initial enrollment verifier | Binds key possession to Kubernetes TokenReview and an enabled workload mapping | Rust/Kubernetes/PostgreSQL | Implemented; REST pending |
+| Instance registry | Owns public keys, bounded leases, and registration history | Rust/PostgreSQL | Implemented |
 | Kernel discovery reconciler | Finds subscribed instances and performs mutual proof-of-possession handshakes | Rust | Planned |
 
 ## Key flows
@@ -114,3 +115,4 @@ Rank the few qualities that drive architectural tradeoffs.
 - [ADR-0005: Use ephemeral per-instance service keys](decisions/0005-use-ephemeral-per-instance-service-keys.md)
 - [ADR-0006: Store instance public keys and leases in PostgreSQL](decisions/0006-store-instance-public-keys-in-postgresql.md)
 - [ADR-0007: Expose no SQL command surface](decisions/0007-expose-no-sql-command-surface.md)
+- [ADR-0008: Use Kubernetes TokenReview for initial enrollment](decisions/0008-use-kubernetes-tokenreview-for-initial-enrollment.md)

@@ -112,7 +112,9 @@ impl Database {
             .batch_execute(concat!(
                 include_str!("../../migrations/0001_identities.sql"),
                 "\n",
-                include_str!("../../migrations/0002_instance_public_key_registry.sql")
+                include_str!("../../migrations/0002_instance_public_key_registry.sql"),
+                "\n",
+                include_str!("../../migrations/0003_service_enrollment_bindings.sql")
             ))
             .map_err(DatabaseError::Query)
     }

@@ -15,6 +15,7 @@ spec:
         app.kubernetes.io/name: infernal-law
     spec:
       automountServiceAccountToken: false
+      serviceAccountName: infernal-law
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -64,4 +65,21 @@ spec:
               drop:
                 - ALL
             readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: kubernetes-reviewer
+              mountPath: /var/run/secrets/infernal-law-kubernetes
+              readOnly: true
+      volumes:
+        - name: kubernetes-reviewer
+          projected:
+            defaultMode: 256
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
       terminationGracePeriodSeconds: 10

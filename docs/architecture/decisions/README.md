@@ -32,3 +32,4 @@ They preserve the context and tradeoffs behind a decision.
 | [ADR-0005: Use ephemeral per-instance service keys](0005-use-ephemeral-per-instance-service-keys.md) | Accepted | 2026-08-28 |
 | [ADR-0006: Store instance public keys and leases in PostgreSQL](0006-store-instance-public-keys-in-postgresql.md) | Accepted | 2026-08-28 |
 | [ADR-0007: Expose no SQL command surface](0007-expose-no-sql-command-surface.md) | Accepted | 2026-08-28 |
+| [ADR-0008: Use Kubernetes TokenReview for initial enrollment](0008-use-kubernetes-tokenreview-for-initial-enrollment.md) | Accepted | 2026-08-28 |

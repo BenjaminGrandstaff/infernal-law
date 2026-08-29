@@ -7,8 +7,10 @@ use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 
 use crate::infrastructure::database::{Database, DatabaseError};
+use crate::infrastructure::postgres_enrollment_binding_repository::PostgresEnrollmentBindingRepository;
 use crate::infrastructure::postgres_identity_repository::PostgresIdentityRepository;
 use crate::infrastructure::postgres_instance_registry::PostgresInstanceRegistry;
+use crate::kernel::enrollment::{EnrollmentService, WorkloadTokenReviewer};
 use crate::kernel::identity::{ActorId, IdentityService};
 use crate::kernel::instance_keys::{InstanceCredential, InstancePublicKey, InstanceSignature};
 use crate::kernel::instance_registry::{InstanceRegistryService, LeasePolicy};
@@ -67,6 +69,20 @@ impl Application {
 
     pub const fn instance_registry(&self) -> &InstanceRegistryService<PostgresInstanceRegistry> {
         &self.instance_registry
+    }
+
+    pub fn enrollment_service<A>(
+        &self,
+        reviewer: A,
+    ) -> EnrollmentService<A, PostgresEnrollmentBindingRepository, PostgresInstanceRegistry>
+    where
+        A: WorkloadTokenReviewer,
+    {
+        EnrollmentService::new(
+            reviewer,
+            PostgresEnrollmentBindingRepository::new(self.database.clone()),
+            self.instance_registry.clone(),
+        )
     }
 }
 

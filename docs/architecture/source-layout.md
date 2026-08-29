@@ -14,6 +14,10 @@ src/
 ├── infrastructure/
 │   ├── mod.rs              # external-system adapter boundary
 │   ├── database.rs         # pooled PostgreSQL and pgvector wiring
+│   ├── kubernetes_token_reviewer.rs
+│   │                        # bootstrap TokenReview adapter
+│   ├── postgres_enrollment_binding_repository.rs
+│   │                        # workload mappings and one-time challenges
 │   ├── postgres_identity_repository.rs
 │                            # PostgreSQL ILK-001 adapter
 │   └── postgres_instance_registry.rs
@@ -26,6 +30,7 @@ src/
     ├── instance_keys.rs    # ephemeral per-process identity keys
     ├── instance_registry.rs
     │                       # kernel-owned public-key and lease contract
+    ├── enrollment.rs       # initial workload/key authentication contract
     ├── authority.rs        # ILK-002
     ├── resources.rs        # ILK-003
     ├── versions.rs         # ILK-004
@@ -47,9 +52,12 @@ tests/
 │                            # per-instance key isolation/signature contract
 ├── instance_registry_contract.rs
 │                            # independently runnable lease-state contract
+├── enrollment_contract.rs  # independently runnable enrollment policy
 ├── kernel_requirements.rs  # independently runnable public kernel test
 ├── postgres_identity_repository.rs
 │                            # opt-in ILK-001 durability test
+├── postgres_enrollment_bindings.rs
+│                            # opt-in enrollment persistence test
 └── postgres_instance_registry.rs
                              # opt-in public-key/lease durability test
 ```
@@ -74,6 +82,7 @@ cargo test --test http_contract
 cargo test --test identity_contract
 cargo test --test instance_keys_contract
 cargo test --test instance_registry_contract
+cargo test --test enrollment_contract
 cargo test --test kernel_requirements
 ```
 
@@ -85,6 +94,7 @@ export INFERNAL_LAW_SERVICE_ID='00000000-0000-4000-8000-000000000001'
 cargo test --test database_connection -- --ignored
 cargo test --test postgres_identity_repository -- --ignored
 cargo test --test postgres_instance_registry -- --ignored
+cargo test --test postgres_enrollment_bindings -- --ignored
 ```
 
 Run the complete suite before merging:

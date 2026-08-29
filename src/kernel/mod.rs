@@ -5,6 +5,7 @@ pub mod artifacts;
 pub mod audit;
 pub mod authority;
 pub mod decisions;
+pub mod enrollment;
 pub mod events;
 pub mod idempotency;
 pub mod identity;

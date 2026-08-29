@@ -1,6 +1,6 @@
 # Direct signed service protocol
 
-> Status: Accepted architecture; implementation pending
+> Status: Accepted architecture; initial enrollment implemented
 > Last reviewed: 2026-08-28
 > Owners: TODO
 
@@ -79,6 +79,15 @@ instance publishes a fresh key and completes a new handshake. See
 [ADR-0005](decisions/0005-use-ephemeral-per-instance-service-keys.md).
 Registry ownership and persistence are specified by
 [ADR-0006](decisions/0006-store-instance-public-keys-in-postgresql.md).
+
+Initial trust uses a separate bootstrap flow. The kernel issues a 30-second,
+single-use challenge stored as a digest in PostgreSQL. The candidate signs the
+challenge together with its proposed key, endpoint, Pod UID, and digest of an
+audience-bound projected ServiceAccount token. Kubernetes TokenReview verifies
+the token and bound Pod; an enabled PostgreSQL binding maps the verified
+namespace, ServiceAccount, and ServiceAccount UID to the stable service ID.
+Only then does the kernel register the public key and lease. See
+[ADR-0008](decisions/0008-use-kubernetes-tokenreview-for-initial-enrollment.md).
 
 ## Verification order
 
