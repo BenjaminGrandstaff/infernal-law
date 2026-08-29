@@ -22,6 +22,7 @@ use crate::kernel::identity::{ActorId, IdentityService};
 use crate::kernel::instance_keys::{InstanceCredential, InstancePublicKey, InstanceSignature};
 use crate::kernel::instance_registry::{InstanceRegistryService, LeasePolicy};
 use crate::kernel::replay_protection::ReplayProtectionService;
+use crate::kernel::request_gate::ServiceRequestGate;
 use crate::kernel::service_requests::ServiceRequestVerifier;
 use crate::kernel::subscriptions::SubscriptionService;
 
@@ -100,6 +101,20 @@ impl Application {
         &self,
     ) -> ServiceRequestVerifier<InstanceRegistryService<PostgresInstanceRegistry>> {
         ServiceRequestVerifier::new(self.instance_registry.clone())
+    }
+
+    pub fn service_request_gate(
+        &self,
+    ) -> ServiceRequestGate<
+        ServiceRequestVerifier<InstanceRegistryService<PostgresInstanceRegistry>>,
+        ReplayProtectionService<PostgresReplayProtectionRepository>,
+        AdmissionService<PostgresAdmissionRepository>,
+    > {
+        ServiceRequestGate::new(
+            self.service_request_verifier(),
+            self.replay_protection.clone(),
+            self.admission.clone(),
+        )
     }
 
     pub const fn subscriptions(&self) -> &SubscriptionService<PostgresSubscriptionRepository> {

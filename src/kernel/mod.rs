@@ -16,6 +16,7 @@ pub mod instance_registry;
 pub mod mediation;
 pub mod relationships;
 pub mod replay_protection;
+pub mod request_gate;
 mod requirement;
 pub mod resources;
 pub mod service_requests;

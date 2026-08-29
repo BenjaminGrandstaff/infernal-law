@@ -48,6 +48,7 @@ src/
     ├── service_requests.rs # fixed signed-HTTP verification profile
     ├── replay_protection.rs
     │                       # atomic nonce and request-ID contract
+    ├── request_gate.rs     # signature/replay/admission composition
     ├── authority.rs        # ILK-002
     ├── resources.rs        # ILK-003
     ├── versions.rs         # ILK-004
@@ -83,6 +84,10 @@ tests/
 ├── replay_protection_contract.rs
 │                            # isolated atomic replay/safe-retry contract
 ├── admission_contract.rs   # isolated default-deny admission contract
+├── service_request_gate_contract.rs
+│                            # ordered fail-closed gate contract
+├── governed_http_middleware_contract.rs
+│                            # strict HTTP extraction/sanitization contract
 ├── kernel_requirements.rs  # independently runnable public kernel test
 ├── postgres_identity_repository.rs
 │                            # opt-in ILK-001 durability test
@@ -96,6 +101,8 @@ tests/
 │                            # opt-in replay persistence/guard test
 ├── postgres_communication_admission.rs
 │                            # opt-in admission administration/history test
+├── postgres_governed_http_middleware.rs
+│                            # opt-in full governed HTTP gate composition
 └── postgres_instance_registry.rs
                              # opt-in public-key/lease durability test
 ```
@@ -128,6 +135,8 @@ cargo test --test handshake_reconciler_contract
 cargo test --test service_request_signature_contract
 cargo test --test replay_protection_contract
 cargo test --test admission_contract
+cargo test --test service_request_gate_contract
+cargo test --test governed_http_middleware_contract
 cargo test --test kernel_requirements
 ```
 
@@ -144,6 +153,7 @@ cargo test --test postgres_subscription_repository -- --ignored
 cargo test --test postgres_handshake_reconciler -- --ignored
 cargo test --test postgres_replay_protection -- --ignored
 cargo test --test postgres_communication_admission -- --ignored
+cargo test --test postgres_governed_http_middleware -- --ignored
 ```
 
 Run the complete suite before merging:

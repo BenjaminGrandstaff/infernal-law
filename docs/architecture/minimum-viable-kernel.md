@@ -100,8 +100,11 @@ Implementation status:
 - Complete: separate default-deny PostgreSQL communication admission, a
   read-only kernel check, idempotent out-of-band administrative changes, direct
   mutation guards, and immutable old/new state history.
-- Pending: signed lease-renewal transport and transport middleware composing
-  signature, replay, and admission checks for governed routes.
+- Complete: governed HTTP middleware with strict single-value security headers,
+  ordered signature, replay, and admission checks, typed caller context, and
+  sanitized fail-closed responses.
+- Pending: signed lease-renewal transport, ILK-002 Authority, and implemented
+  governed subscription handlers behind the middleware.
 - Pending: mediation and audit integration that attributes every completed
   operation to that service and signing key.
 

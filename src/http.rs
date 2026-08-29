@@ -13,6 +13,13 @@ use crate::kernel::enrollment::{
     WorkloadTokenReviewer,
 };
 use crate::kernel::instance_registry::{InstanceRegistryRepository, RegisteredInstance};
+use crate::kernel::request_gate::{
+    AdmittedServiceRequest, ServiceRequestGate, ServiceRequestGateError,
+};
+use crate::kernel::service_requests::{
+    ServiceRequestAuthenticationError, ServiceRequestParts, SignedServiceRequest,
+};
+use crate::kernel::{admission::AdmissionError, replay_protection::ReplayProtectionError};
 use crate::wiring::Application;
 
 use self::enrollment_dto::{
@@ -31,6 +38,84 @@ pub struct Response {
     pub status: &'static str,
     pub content_type: &'static str,
     pub body: String,
+}
+
+pub struct GovernedHttpRequest<'a> {
+    pub method: &'a str,
+    pub authority: &'a str,
+    pub path_and_query: &'a str,
+    pub content_type: &'a str,
+    pub body: &'a [u8],
+    pub service_id: &'a str,
+    pub instance_id: &'a str,
+    pub request_id: &'a str,
+    pub content_digest: &'a str,
+    pub signature_input: &'a str,
+    pub signature: &'a str,
+}
+
+impl GovernedHttpRequest<'_> {
+    fn into_signed(self) -> Result<SignedServiceRequest, ServiceRequestAuthenticationError> {
+        let request_id = self
+            .request_id
+            .parse()
+            .map_err(|_| ServiceRequestAuthenticationError::Malformed)?;
+        let parts = ServiceRequestParts::new(
+            self.method,
+            self.authority,
+            self.path_and_query,
+            self.content_type,
+            self.body,
+            request_id,
+        )?;
+        SignedServiceRequest::from_wire(
+            parts,
+            self.service_id,
+            self.instance_id,
+            self.content_digest,
+            self.signature_input,
+            self.signature,
+        )
+    }
+}
+
+pub trait GovernedRequestAuthenticator {
+    fn authenticate_governed(
+        &self,
+        request: &SignedServiceRequest,
+        now: i64,
+    ) -> Result<AdmittedServiceRequest, ServiceRequestGateError>;
+}
+
+impl<V, P, A> GovernedRequestAuthenticator for ServiceRequestGate<V, P, A>
+where
+    V: crate::kernel::request_gate::SignatureVerification,
+    P: crate::kernel::request_gate::ReplayReservation,
+    A: crate::kernel::request_gate::CommunicationAdmissionCheck,
+{
+    fn authenticate_governed(
+        &self,
+        request: &SignedServiceRequest,
+        now: i64,
+    ) -> Result<AdmittedServiceRequest, ServiceRequestGateError> {
+        self.admit(request, now)
+    }
+}
+
+pub fn authenticate_governed_request<A>(
+    request: GovernedHttpRequest<'_>,
+    authenticator: &A,
+    now: i64,
+) -> Result<AdmittedServiceRequest, Response>
+where
+    A: GovernedRequestAuthenticator,
+{
+    let signed = request
+        .into_signed()
+        .map_err(|_| authentication_rejected())?;
+    authenticator
+        .authenticate_governed(&signed, now)
+        .map_err(gate_error_response)
 }
 
 pub trait EnrollmentAuthenticator {
@@ -118,11 +203,109 @@ fn dispatch(request: ParsedRequest, application: &Application) -> Response {
         return authenticate_enrollment(enrollment_request, &service, unix_time());
     }
 
+    if is_governed_route(&request.path) {
+        if !is_supported_governed_method(&request.method, &request.path) {
+            return text_response("405 Method Not Allowed", "method not allowed\n");
+        }
+        let governed = match request.as_governed() {
+            Some(request) => request,
+            None => return authentication_rejected(),
+        };
+        let gate = application.service_request_gate();
+        return match authenticate_governed_request(governed, &gate, unix_time()) {
+            Ok(_) => json_response(
+                "501 Not Implemented",
+                &GovernedErrorResponse::route_not_implemented(),
+            ),
+            Err(response) => response,
+        };
+    }
+
     if request.path == "/health/ready" {
         readiness_response(application.database().check_connection().is_ok())
     } else {
         route(&request.path)
     }
+}
+
+#[derive(serde::Serialize)]
+struct GovernedErrorResponse {
+    code: &'static str,
+    message: &'static str,
+}
+
+impl GovernedErrorResponse {
+    const fn authentication_rejected() -> Self {
+        Self {
+            code: "request_rejected",
+            message: "request authentication failed",
+        }
+    }
+
+    const fn communication_disabled() -> Self {
+        Self {
+            code: "communication_disabled",
+            message: "service communication is disabled",
+        }
+    }
+
+    const fn unavailable() -> Self {
+        Self {
+            code: "security_boundary_unavailable",
+            message: "request security checks are unavailable",
+        }
+    }
+
+    const fn route_not_implemented() -> Self {
+        Self {
+            code: "route_not_implemented",
+            message: "governed route is not implemented",
+        }
+    }
+}
+
+fn authentication_rejected() -> Response {
+    json_response(
+        "401 Unauthorized",
+        &GovernedErrorResponse::authentication_rejected(),
+    )
+}
+
+fn gate_error_response(error: ServiceRequestGateError) -> Response {
+    match error {
+        ServiceRequestGateError::Admission(AdmissionError::Disabled(_)) => json_response(
+            "403 Forbidden",
+            &GovernedErrorResponse::communication_disabled(),
+        ),
+        ServiceRequestGateError::Signature(ServiceRequestAuthenticationError::Registry(
+            crate::kernel::instance_registry::InstanceRegistryError::Repository(_),
+        ))
+        | ServiceRequestGateError::Replay(ReplayProtectionError::Repository(_))
+        | ServiceRequestGateError::Admission(
+            AdmissionError::Repository(_) | AdmissionError::InvalidStoredRecord,
+        ) => json_response(
+            "503 Service Unavailable",
+            &GovernedErrorResponse::unavailable(),
+        ),
+        ServiceRequestGateError::Admission(AdmissionError::UnknownService(_))
+        | ServiceRequestGateError::Replay(
+            ReplayProtectionError::ReplayDetected
+            | ReplayProtectionError::RequestIdConflict
+            | ReplayProtectionError::InvalidTimestamp,
+        )
+        | ServiceRequestGateError::Signature(_) => authentication_rejected(),
+    }
+}
+
+fn is_governed_route(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    path == "/v1/subscriptions" || path.starts_with("/v1/subscriptions/")
+}
+
+fn is_supported_governed_method(method: &str, path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    (path == "/v1/subscriptions" && matches!(method, "GET" | "POST"))
+        || (path.starts_with("/v1/subscriptions/") && method == "DELETE")
 }
 
 pub fn enrollment_response<A>(
@@ -267,8 +450,33 @@ fn write_response(stream: &mut TcpStream, response: &Response) -> std::io::Resul
 struct ParsedRequest {
     method: String,
     path: String,
+    authority: Option<String>,
     content_type: Option<String>,
+    content_digest: Option<String>,
+    service_id: Option<String>,
+    instance_id: Option<String>,
+    request_id: Option<String>,
+    signature_input: Option<String>,
+    signature: Option<String>,
     body: Vec<u8>,
+}
+
+impl ParsedRequest {
+    fn as_governed(&self) -> Option<GovernedHttpRequest<'_>> {
+        Some(GovernedHttpRequest {
+            method: &self.method,
+            authority: self.authority.as_deref()?,
+            path_and_query: &self.path,
+            content_type: self.content_type.as_deref()?,
+            body: &self.body,
+            service_id: self.service_id.as_deref()?,
+            instance_id: self.instance_id.as_deref()?,
+            request_id: self.request_id.as_deref()?,
+            content_digest: self.content_digest.as_deref()?,
+            signature_input: self.signature_input.as_deref()?,
+            signature: self.signature.as_deref()?,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -320,9 +528,19 @@ fn read_request(stream: &mut impl Read) -> Result<ParsedRequest, RequestReadErro
     }
 
     let mut content_length = None;
+    let mut authority = None;
     let mut content_type = None;
+    let mut content_digest = None;
+    let mut service_id = None;
+    let mut instance_id = None;
+    let mut request_id = None;
+    let mut signature_input = None;
+    let mut signature = None;
     for line in lines {
         let (name, value) = line.split_once(':').ok_or(RequestReadError::Malformed)?;
+        if !valid_header_name(name) {
+            return Err(RequestReadError::Malformed);
+        }
         let value = value.trim();
         if name.eq_ignore_ascii_case("content-length") {
             if content_length.is_some() {
@@ -334,10 +552,21 @@ fn read_request(stream: &mut impl Read) -> Result<ParsedRequest, RequestReadErro
                     .map_err(|_| RequestReadError::Malformed)?,
             );
         } else if name.eq_ignore_ascii_case("content-type") {
-            if content_type.is_some() {
-                return Err(RequestReadError::Malformed);
-            }
-            content_type = Some(value.to_owned());
+            set_header(&mut content_type, value)?;
+        } else if name.eq_ignore_ascii_case("host") {
+            set_header(&mut authority, value)?;
+        } else if name.eq_ignore_ascii_case("content-digest") {
+            set_header(&mut content_digest, value)?;
+        } else if name.eq_ignore_ascii_case("infernal-service-id") {
+            set_header(&mut service_id, value)?;
+        } else if name.eq_ignore_ascii_case("infernal-instance-id") {
+            set_header(&mut instance_id, value)?;
+        } else if name.eq_ignore_ascii_case("infernal-request-id") {
+            set_header(&mut request_id, value)?;
+        } else if name.eq_ignore_ascii_case("signature-input") {
+            set_header(&mut signature_input, value)?;
+        } else if name.eq_ignore_ascii_case("signature") {
+            set_header(&mut signature, value)?;
         } else if name.eq_ignore_ascii_case("transfer-encoding") {
             return Err(RequestReadError::Malformed);
         }
@@ -366,9 +595,48 @@ fn read_request(stream: &mut impl Read) -> Result<ParsedRequest, RequestReadErro
     Ok(ParsedRequest {
         method,
         path,
+        authority,
         content_type,
+        content_digest,
+        service_id,
+        instance_id,
+        request_id,
+        signature_input,
+        signature,
         body: bytes[body_start..body_start + content_length].to_vec(),
     })
+}
+
+fn set_header(target: &mut Option<String>, value: &str) -> Result<(), RequestReadError> {
+    if target.is_some() || value.is_empty() {
+        return Err(RequestReadError::Malformed);
+    }
+    *target = Some(value.to_owned());
+    Ok(())
+}
+
+fn valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
 }
 
 fn find_header_end(bytes: &[u8]) -> Option<usize> {
@@ -429,6 +697,30 @@ mod tests {
         assert_eq!(
             read_request(&mut Cursor::new(request)),
             Err(RequestReadError::PayloadTooLarge)
+        );
+    }
+
+    #[test]
+    fn parser_collects_each_governed_security_header_once() {
+        let request = b"GET /v1/subscriptions HTTP/1.1\r\nHost: kernel.example.test\r\nContent-Type: application/json\r\nContent-Digest: sha-256=:digest:\r\nInfernal-Service-Id: service\r\nInfernal-Instance-Id: instance\r\nInfernal-Request-Id: request\r\nSignature-Input: sig1=(components)\r\nSignature: sig1=:signature:\r\n\r\n";
+        let parsed = read_request(&mut Cursor::new(request)).unwrap();
+
+        assert_eq!(parsed.authority.as_deref(), Some("kernel.example.test"));
+        assert_eq!(parsed.content_digest.as_deref(), Some("sha-256=:digest:"));
+        assert_eq!(parsed.service_id.as_deref(), Some("service"));
+        assert_eq!(parsed.instance_id.as_deref(), Some("instance"));
+        assert_eq!(parsed.request_id.as_deref(), Some("request"));
+        assert_eq!(parsed.signature_input.as_deref(), Some("sig1=(components)"));
+        assert_eq!(parsed.signature.as_deref(), Some("sig1=:signature:"));
+    }
+
+    #[test]
+    fn parser_rejects_duplicate_security_headers() {
+        let request = b"GET /v1/subscriptions HTTP/1.1\r\nHost: kernel.example.test\r\nSignature: sig1=:first:\r\nSignature: sig1=:second:\r\n\r\n";
+
+        assert_eq!(
+            read_request(&mut Cursor::new(request)),
+            Err(RequestReadError::Malformed)
         );
     }
 }

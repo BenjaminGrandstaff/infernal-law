@@ -63,9 +63,10 @@ digest and binds the service/request ID to a semantic request fingerprint.
 Exact nonce reuse is rejected, the same request ID with different content is a
 conflict, and a new signature and nonce over the same semantic request is
 classified as a safe retry for later idempotency resolution. Raw nonces are not
-persisted. Communication admission, authority, and governed-route HTTP
-middleware remain separate fail-closed steps; cryptographic verification and
-replay reservation alone do not authorize an operation.
+persisted. The governed-route HTTP middleware now composes cryptographic
+verification, replay reservation, and communication admission in that order.
+Authority remains a separate required fail-closed step; authentication and
+admission alone do not authorize an operation.
 
 ## Per-instance key creation and public-key registry
 
@@ -165,6 +166,22 @@ For every non-public request, the kernel MUST:
 
 Failure at any step rejects the request before governed state mutation. Health
 does not bypass these checks.
+
+The implemented middleware accepts each `Host`, `Content-Type`,
+`Content-Digest`, `Infernal-Service-Id`, `Infernal-Instance-Id`,
+`Infernal-Request-Id`, `Signature-Input`, and `Signature` header exactly once.
+Missing, empty, duplicated, malformed, or non-canonical security fields fail
+before a route handler. It returns typed verified service/key/request context
+only after replay state is atomically reserved and communication admission is
+enabled. Authentication and replay failures use a sanitized `401`; disabled
+communication uses a deterministic sanitized `403`; unavailable persistence
+uses a sanitized `503`.
+
+Known subscription paths are wired through this boundary, but currently return
+`501` after successful admission because ILK-002 Authority and the governed
+handlers are not implemented. This preserves fail-closed behavior while making
+the transport boundary executable and testable. Public health and initial
+enrollment routes remain outside governed-request authentication by design.
 
 ## No SQL command surface
 

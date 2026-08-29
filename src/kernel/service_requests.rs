@@ -59,11 +59,13 @@ impl ServiceRequestParts {
     ) -> Result<Self, ServiceRequestAuthenticationError> {
         if method.is_empty()
             || !method.bytes().all(|byte| byte.is_ascii_uppercase())
-            || !valid_header_value(authority)
-            || authority.contains('/')
+            || !valid_uri_value(authority)
+            || authority
+                .bytes()
+                .any(|byte| matches!(byte, b'/' | b'@' | b'?' | b'#'))
             || !path_and_query.starts_with('/')
             || path_and_query.contains('#')
-            || !valid_header_value(path_and_query)
+            || !valid_uri_value(path_and_query)
             || !valid_header_value(content_type)
         {
             return Err(ServiceRequestAuthenticationError::Malformed);
@@ -496,6 +498,10 @@ fn valid_header_value(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
         && value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+}
+
+fn valid_uri_value(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
