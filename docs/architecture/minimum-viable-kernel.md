@@ -264,9 +264,12 @@ Implementation status:
 - Complete: typed subscription UUIDs and event types; stable-service ownership;
   durable create, history list, active list, and disable contracts; one-active
   subscription uniqueness; append-only create/disable audit; protected disabled
-  history; PostgreSQL adapter; and isolated plus live persistence tests.
+  history; PostgreSQL adapter; distinct eligible-instance discovery; per-kernel
+  signed proof-of-possession reconciliation; append-only handshake persistence;
+  failure isolation; fresh-handshake delivery gate; and isolated plus live
+  persistence tests.
 - Pending: signed REST operations, ILK-002 authorization integration, delivery
-  cursors, discovery/handshake reconciliation, and capacity-aware delivery.
+  cursors, production outbound handshake transport, and capacity-aware delivery.
 
 ### ILK-011: Work claims
 

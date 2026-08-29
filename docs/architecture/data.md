@@ -42,6 +42,8 @@ Migration 0003 creates disabled-by-default Kubernetes workload bindings and
 hashed, expiring, single-use initial-enrollment challenges.
 Migration 0004 creates stable-service subscriptions, one-active-event
 uniqueness, immutable disabled history, and append-only subscription audit.
+Migration 0005 creates append-preserving per-kernel handshake challenges,
+successful handshake history, freshness indexes, and handshake audit records.
 Applied migration versions are recorded in `kernel_schema_migrations`.
 
 The `PostgresIdentityRepository` adapter implements the identity module's

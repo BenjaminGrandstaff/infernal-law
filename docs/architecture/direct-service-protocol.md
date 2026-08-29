@@ -80,6 +80,22 @@ instance publishes a fresh key and completes a new handshake. See
 Registry ownership and persistence are specified by
 [ADR-0006](decisions/0006-store-instance-public-keys-in-postgresql.md).
 
+The subscribed-instance reconciler is implemented behind a bounded exchange
+transport contract. PostgreSQL discovery returns each eligible instance once
+even when its stable service has several active event subscriptions. Every
+kernel instance signs its own 15-second challenge; the target signs a response
+bound to the challenge digest and its registered instance/key IDs. Successful
+proof creates an append-only handshake record lasting at most 30 seconds and
+never beyond the target lease. Challenge consumption and success persistence
+are atomic. A handshake from an earlier kernel process cannot be reused by a
+new kernel instance.
+
+Transport failures are recorded as per-instance reconciliation outcomes and do
+not stop later candidates. A transport implementation must impose a finite
+connection and response timeout. Delivery code must call the fresh-handshake
+gate in addition to checking admission, key/lease state, subscription state,
+health, and capacity. The production outbound HTTP transport remains pending.
+
 Initial trust uses a separate bootstrap flow. The kernel issues a 30-second,
 single-use challenge stored as a digest in PostgreSQL. The candidate signs the
 challenge together with its proposed key, endpoint, Pod UID, and digest of an

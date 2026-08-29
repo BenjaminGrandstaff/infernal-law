@@ -24,6 +24,10 @@ src/
 │                            # PostgreSQL ILK-001 adapter
 │   ├── postgres_instance_registry.rs
 │                            # public keys, leases, revocation, audit
+│   ├── postgres_handshake_repository.rs
+│   │                        # challenge consumption and handshake history
+│   ├── postgres_subscribed_instance_discovery.rs
+│   │                        # active-subscription/eligible-instance read model
 │   └── postgres_subscription_repository.rs
 │                            # ILK-010 persistence and append-only audit
 ├── wiring.rs               # process dependency construction
@@ -35,6 +39,7 @@ src/
     ├── instance_registry.rs
     │                       # kernel-owned public-key and lease contract
     ├── enrollment.rs       # initial workload/key authentication contract
+    ├── handshakes.rs       # subscribed-instance proof reconciler and gate
     ├── authority.rs        # ILK-002
     ├── resources.rs        # ILK-003
     ├── versions.rs         # ILK-004
@@ -63,6 +68,8 @@ tests/
 │                            # independently runnable POST handler contract
 ├── subscription_contract.rs
 │                            # independently runnable ILK-010 contract
+├── handshake_reconciler_contract.rs
+│                            # isolated signed/failure-isolation contract
 ├── kernel_requirements.rs  # independently runnable public kernel test
 ├── postgres_identity_repository.rs
 │                            # opt-in ILK-001 durability test
@@ -70,6 +77,8 @@ tests/
 │                            # opt-in enrollment persistence test
 ├── postgres_subscription_repository.rs
 │                            # opt-in ILK-010 durability/history test
+├── postgres_handshake_reconciler.rs
+│                            # opt-in discovery/handshake persistence test
 └── postgres_instance_registry.rs
                              # opt-in public-key/lease durability test
 ```
@@ -98,6 +107,7 @@ cargo test --test enrollment_contract
 cargo test --test enrollment_json_contract
 cargo test --test enrollment_http_contract
 cargo test --test subscription_contract
+cargo test --test handshake_reconciler_contract
 cargo test --test kernel_requirements
 ```
 
@@ -111,6 +121,7 @@ cargo test --test postgres_identity_repository -- --ignored
 cargo test --test postgres_instance_registry -- --ignored
 cargo test --test postgres_enrollment_bindings -- --ignored
 cargo test --test postgres_subscription_repository -- --ignored
+cargo test --test postgres_handshake_reconciler -- --ignored
 ```
 
 Run the complete suite before merging:

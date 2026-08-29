@@ -7,6 +7,7 @@ pub mod authority;
 pub mod decisions;
 pub mod enrollment;
 pub mod events;
+pub mod handshakes;
 pub mod idempotency;
 pub mod identity;
 pub mod instance_keys;

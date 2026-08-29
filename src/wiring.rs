@@ -8,10 +8,13 @@ use std::sync::Arc;
 
 use crate::infrastructure::database::{Database, DatabaseError};
 use crate::infrastructure::postgres_enrollment_binding_repository::PostgresEnrollmentBindingRepository;
+use crate::infrastructure::postgres_handshake_repository::PostgresHandshakeRepository;
 use crate::infrastructure::postgres_identity_repository::PostgresIdentityRepository;
 use crate::infrastructure::postgres_instance_registry::PostgresInstanceRegistry;
+use crate::infrastructure::postgres_subscribed_instance_discovery::PostgresSubscribedInstanceDiscovery;
 use crate::infrastructure::postgres_subscription_repository::PostgresSubscriptionRepository;
 use crate::kernel::enrollment::{EnrollmentService, WorkloadTokenReviewer};
+use crate::kernel::handshakes::{HandshakeReconciler, HandshakeTransport};
 use crate::kernel::identity::{ActorId, IdentityService};
 use crate::kernel::instance_keys::{InstanceCredential, InstancePublicKey, InstanceSignature};
 use crate::kernel::instance_registry::{InstanceRegistryService, LeasePolicy};
@@ -79,6 +82,21 @@ impl Application {
 
     pub const fn subscriptions(&self) -> &SubscriptionService<PostgresSubscriptionRepository> {
         &self.subscriptions
+    }
+
+    pub fn handshake_reconciler<T>(
+        &self,
+        transport: T,
+    ) -> HandshakeReconciler<PostgresSubscribedInstanceDiscovery, PostgresHandshakeRepository, T>
+    where
+        T: HandshakeTransport,
+    {
+        HandshakeReconciler::new(
+            self.instance_credential.clone(),
+            PostgresSubscribedInstanceDiscovery::new(self.database.clone()),
+            PostgresHandshakeRepository::new(self.database.clone()),
+            transport,
+        )
     }
 
     pub fn enrollment_service<A>(
