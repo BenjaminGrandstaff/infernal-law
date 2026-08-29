@@ -20,6 +20,8 @@ src/
 │   │                        # bootstrap TokenReview adapter
 │   ├── postgres_admission_repository.rs
 │   │                        # read-only communication admission check
+│   ├── postgres_authority_repository.rs
+│   │                        # read-only ILK-002 grant matching
 │   ├── postgres_enrollment_binding_repository.rs
 │   │                        # workload mappings and one-time challenges
 │   ├── postgres_identity_repository.rs
@@ -107,6 +109,8 @@ tests/
 │                            # opt-in ILK-003 durability/history test
 ├── postgres_communication_admission.rs
 │                            # opt-in admission administration/history test
+├── postgres_authority_repository.rs
+│                            # opt-in ILK-002 grant administration/read test
 ├── postgres_governed_http_middleware.rs
 │                            # opt-in full governed HTTP gate composition
 └── postgres_instance_registry.rs
@@ -162,6 +166,7 @@ cargo test --test postgres_handshake_reconciler -- --ignored
 cargo test --test postgres_replay_protection -- --ignored
 cargo test --test postgres_request_repository -- --ignored
 cargo test --test postgres_communication_admission -- --ignored
+cargo test --test postgres_authority_repository -- --ignored
 cargo test --test postgres_governed_http_middleware -- --ignored
 ```
 

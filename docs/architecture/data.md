@@ -59,6 +59,10 @@ changes, and append-only admission history.
 Migration 0008 creates append-only accepted requests scoped to
 `(source_service_id, request_id)`, a semantic fingerprint binding that rejects
 rebinding to different content, and append-only acceptance audit.
+Migration 0009 creates append-only ILK-002 authority grants, an idempotent
+conflict-detecting `create_authority_grant` administration function, and
+append-only grant administration audit; the Rust kernel only ever reads
+grants, exactly as it only ever reads communication admission.
 Applied migration versions are recorded in `kernel_schema_migrations`.
 
 The `PostgresIdentityRepository` adapter implements the identity module's

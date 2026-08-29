@@ -189,11 +189,33 @@ impl Grant {
         valid_from: i64,
         valid_until: Option<i64>,
     ) -> Result<Self, AuthorityError> {
+        Self::restore(
+            GrantId::new(),
+            source,
+            action,
+            scope,
+            destination,
+            valid_from,
+            valid_until,
+        )
+    }
+
+    /// Reconstructs a grant with its already-assigned, durably stored ID.
+    /// Used by repository adapters; new grants should use [`Grant::new`].
+    pub fn restore(
+        id: GrantId,
+        source: ActorId,
+        action: ActionName,
+        scope: Scope,
+        destination: Option<ActorId>,
+        valid_from: i64,
+        valid_until: Option<i64>,
+    ) -> Result<Self, AuthorityError> {
         if valid_from < 0 || valid_until.is_some_and(|until| until <= valid_from) {
             return Err(AuthorityError::InvalidValidityWindow);
         }
         Ok(Self {
-            id: GrantId::new(),
+            id,
             source,
             action,
             scope,
