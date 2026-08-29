@@ -90,9 +90,12 @@ Implementation status:
 - Complete: kernel-owned PostgreSQL public-key registration, immutable key
   records, bounded compare-and-set leases, revocation, and append-only registry
   audit storage behind a typed repository contract.
-- Pending: authenticated initial enrollment, signed lease-renewal transport,
-  kernel-to-subscriber discovery handshake, direct HTTP Message Signature
-  verification, timestamp/nonce replay defense, and database communication
+- Complete: authenticated initial enrollment, kernel-to-subscriber discovery
+  handshakes, and fixed-profile Ed25519 HTTP Message Signature verification
+  covering the request method, target URI, content, stable service, instance,
+  key, and request ID with bounded signature timestamps.
+- Pending: signed lease-renewal transport, atomic nonce replay defense,
+  transport middleware for governed routes, and database communication
   admission.
 - Pending: mediation and audit integration that attributes every completed
   operation to that service and signing key.

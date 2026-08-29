@@ -18,6 +18,7 @@ use crate::kernel::handshakes::{HandshakeReconciler, HandshakeTransport};
 use crate::kernel::identity::{ActorId, IdentityService};
 use crate::kernel::instance_keys::{InstanceCredential, InstancePublicKey, InstanceSignature};
 use crate::kernel::instance_registry::{InstanceRegistryService, LeasePolicy};
+use crate::kernel::service_requests::ServiceRequestVerifier;
 use crate::kernel::subscriptions::SubscriptionService;
 
 pub const SERVICE_ID_ENV: &str = "INFERNAL_LAW_SERVICE_ID";
@@ -78,6 +79,12 @@ impl Application {
 
     pub const fn instance_registry(&self) -> &InstanceRegistryService<PostgresInstanceRegistry> {
         &self.instance_registry
+    }
+
+    pub fn service_request_verifier(
+        &self,
+    ) -> ServiceRequestVerifier<InstanceRegistryService<PostgresInstanceRegistry>> {
+        ServiceRequestVerifier::new(self.instance_registry.clone())
     }
 
     pub const fn subscriptions(&self) -> &SubscriptionService<PostgresSubscriptionRepository> {

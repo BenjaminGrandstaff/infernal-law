@@ -1,7 +1,7 @@
 # Direct signed service protocol
 
-> Status: Accepted architecture; initial enrollment implemented
-> Last reviewed: 2026-08-28
+> Status: Accepted architecture; enrollment and request signature verification implemented
+> Last reviewed: 2026-08-29
 > Owners: TODO
 
 ## State dimensions
@@ -44,9 +44,23 @@ The private key remains with the calling service. The kernel stores public
 keys and lifecycle metadata only. HTTPS remains mandatory for confidentiality;
 message signatures provide end-to-end request integrity and authentication.
 
-The exact asymmetric algorithm and key encoding require a separate decision.
-No custom construction such as concatenating fields and hashing them is
-permitted.
+The implemented service-request profile uses Ed25519 and RFC 9421 signature
+bases. It requires exactly one `sig1` signature covering `@method`,
+`@target-uri`, `content-digest`, `content-type`, `infernal-service-id`,
+`infernal-instance-id`, and `infernal-request-id`. Its signature parameters are
+`created`, `expires`, `nonce`, `keyid`, and `alg="ed25519"`. Bodies use the
+RFC 9530 `sha-256` content-digest form. Signature validity is at most 30 seconds
+with at most five seconds of clock skew. The fixed profile rejects missing,
+additional, reordered, duplicate, non-canonical, or malformed security fields
+rather than negotiating a weaker profile.
+
+The verifier resolves the named instance from the kernel-owned registry,
+requires a current unrevoked lease, checks that the stable service, instance,
+and key IDs all match, verifies the body digest, and then verifies the Ed25519
+signature. It returns typed verified context containing those IDs and the
+unique request ID. Persistent nonce reservation, communication admission,
+authority, and governed-route HTTP middleware remain separate fail-closed
+steps; cryptographic verification alone does not authorize an operation.
 
 ## Per-instance key creation and public-key registry
 

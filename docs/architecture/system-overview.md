@@ -63,6 +63,7 @@ known.
 | Instance registry | Owns public keys, bounded leases, and registration history | Rust/PostgreSQL | Implemented |
 | Subscription registry | Owns typed stable-service event interests and immutable disabled history | Rust/PostgreSQL | Implemented; REST pending |
 | Kernel discovery reconciler | Finds subscribed instances and performs per-kernel mutual proof-of-possession handshakes | Rust/PostgreSQL | Implemented; outbound HTTP transport pending |
+| Service request verifier | Verifies the fixed signed-HTTP profile against eligible registry keys and returns typed caller context | Rust | Implemented; replay/admission middleware pending |
 
 ## Key flows
 

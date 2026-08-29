@@ -1,7 +1,7 @@
 # Rust source layout
 
 > Status: Active  
-> Last reviewed: 2026-08-28
+> Last reviewed: 2026-08-29
 
 The crate separates the executable process from independently testable
 library modules:
@@ -40,6 +40,7 @@ src/
     │                       # kernel-owned public-key and lease contract
     ├── enrollment.rs       # initial workload/key authentication contract
     ├── handshakes.rs       # subscribed-instance proof reconciler and gate
+    ├── service_requests.rs # fixed signed-HTTP verification profile
     ├── authority.rs        # ILK-002
     ├── resources.rs        # ILK-003
     ├── versions.rs         # ILK-004
@@ -70,6 +71,8 @@ tests/
 │                            # independently runnable ILK-010 contract
 ├── handshake_reconciler_contract.rs
 │                            # isolated signed/failure-isolation contract
+├── service_request_signature_contract.rs
+│                            # isolated signed-HTTP verification contract
 ├── kernel_requirements.rs  # independently runnable public kernel test
 ├── postgres_identity_repository.rs
 │                            # opt-in ILK-001 durability test
@@ -108,6 +111,7 @@ cargo test --test enrollment_json_contract
 cargo test --test enrollment_http_contract
 cargo test --test subscription_contract
 cargo test --test handshake_reconciler_contract
+cargo test --test service_request_signature_contract
 cargo test --test kernel_requirements
 ```
 

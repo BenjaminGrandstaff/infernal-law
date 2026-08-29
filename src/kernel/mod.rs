@@ -16,6 +16,7 @@ pub mod mediation;
 pub mod relationships;
 mod requirement;
 pub mod resources;
+pub mod service_requests;
 pub mod subscriptions;
 pub mod versions;
 pub mod work_claims;
