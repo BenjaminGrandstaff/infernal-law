@@ -3,6 +3,7 @@
 
 use r2d2_postgres::postgres::{Error as PostgresError, Row, Transaction, error::SqlState};
 
+use crate::kernel::authority::{SchemaVersionId, SchemaVersionRefs, Scope};
 use crate::kernel::identity::ActorId;
 use crate::kernel::requests::{
     AcceptedRequest, Request, RequestAcceptance, RequestError, RequestFingerprint, RequestId,
@@ -12,20 +13,25 @@ use crate::kernel::requests::{
 use super::database::Database;
 
 const INSERT_SQL: &str = "INSERT INTO accepted_requests \
-    (source_service_id, request_id, action, semantic_fingerprint) \
-    VALUES ($1::text::uuid, $2::text::uuid, $3, $4) \
+    (source_service_id, request_id, action, scope, artifact_schema_version_id, \
+     permission_policy_schema_version_id, semantic_fingerprint) \
+    VALUES ($1::text::uuid, $2::text::uuid, $3, $4, $5::text::uuid, $6::text::uuid, $7) \
     ON CONFLICT (source_service_id, request_id) DO NOTHING \
-    RETURNING source_service_id::text, request_id::text, action, \
+    RETURNING source_service_id::text, request_id::text, action, scope, \
+              artifact_schema_version_id::text, permission_policy_schema_version_id::text, \
               semantic_fingerprint, \
               EXTRACT(EPOCH FROM accepted_at)::bigint AS accepted_at";
-const FIND_SQL: &str = "SELECT source_service_id::text, request_id::text, action, \
+const FIND_SQL: &str = "SELECT source_service_id::text, request_id::text, action, scope, \
+        artifact_schema_version_id::text, permission_policy_schema_version_id::text, \
         semantic_fingerprint, \
         EXTRACT(EPOCH FROM accepted_at)::bigint AS accepted_at \
     FROM accepted_requests \
     WHERE source_service_id = $1::text::uuid AND request_id = $2::text::uuid";
 const AUDIT_SQL: &str = "INSERT INTO request_acceptance_audit \
-    (source_service_id, request_id, attempted_action, attempted_fingerprint, outcome) \
-    VALUES ($1::text::uuid, $2::text::uuid, $3, $4, $5)";
+    (source_service_id, request_id, attempted_action, attempted_scope, \
+     attempted_artifact_schema_version_id, attempted_permission_policy_schema_version_id, \
+     attempted_fingerprint, outcome) \
+    VALUES ($1::text::uuid, $2::text::uuid, $3, $4, $5::text::uuid, $6::text::uuid, $7, $8)";
 
 #[derive(Clone)]
 pub struct PostgresRequestRepository {
@@ -49,18 +55,32 @@ impl RequestRepository for PostgresRequestRepository {
         let source_service = request.source_service().to_string();
         let request_id = request.id().to_string();
         let action = request.action().as_str();
+        let scope = request.scope().as_str();
+        let artifact_schema_version_id = request.schema_versions().artifact().to_string();
+        let permission_policy_schema_version_id =
+            request.schema_versions().permission_policy().to_string();
         let fingerprint_bytes = fingerprint.as_bytes().as_slice();
 
         let inserted = transaction.query_opt(
             INSERT_SQL,
-            &[&source_service, &request_id, &action, &fingerprint_bytes],
+            &[
+                &source_service,
+                &request_id,
+                &action,
+                &scope,
+                &artifact_schema_version_id,
+                &permission_policy_schema_version_id,
+                &fingerprint_bytes,
+            ],
         );
         let inserted = match inserted {
             Ok(value) => value,
-            Err(error) if is_foreign_key_violation(&error) => {
-                return Err(RequestError::UnknownSource(request.source_service()));
+            Err(error) => {
+                return Err(
+                    foreign_key_violation_error(&error, request.source_service())
+                        .unwrap_or_else(|| repository_error(error)),
+                );
             }
-            Err(error) => return Err(repository_error(error)),
         };
 
         if let Some(row) = inserted {
@@ -126,6 +146,9 @@ fn append_audit(
                 &request.source_service().to_string(),
                 &request.id().to_string(),
                 &request.action().as_str(),
+                &request.scope().as_str(),
+                &request.schema_versions().artifact().to_string(),
+                &request.schema_versions().permission_policy().to_string(),
                 &fingerprint.as_bytes().as_slice(),
                 &outcome,
             ],
@@ -145,8 +168,34 @@ fn accepted_request_from_row(row: &Row) -> Result<AcceptedRequest, RequestError>
         .parse::<ActorId>()
         .map_err(|error| RequestError::Repository(format!("invalid stored source ID: {error}")))?;
     let request_id = row.get::<_, String>("request_id").parse::<RequestId>()?;
-    let request = Request::restore(request_id, source_service, row.get("action"))
-        .map_err(|_| RequestError::Repository("stored request action is invalid".to_owned()))?;
+    let scope = Scope::new(row.get("scope"))
+        .map_err(|_| RequestError::Repository("stored request scope is invalid".to_owned()))?;
+    let artifact_schema_version_id = row
+        .get::<_, String>("artifact_schema_version_id")
+        .parse::<SchemaVersionId>()
+        .map_err(|_| {
+            RequestError::Repository("stored artifact schema version ID is invalid".to_owned())
+        })?;
+    let permission_policy_schema_version_id = row
+        .get::<_, String>("permission_policy_schema_version_id")
+        .parse::<SchemaVersionId>()
+        .map_err(|_| {
+            RequestError::Repository(
+                "stored permission-policy schema version ID is invalid".to_owned(),
+            )
+        })?;
+    let schema_versions = SchemaVersionRefs::new(
+        artifact_schema_version_id,
+        permission_policy_schema_version_id,
+    );
+    let request = Request::restore(
+        request_id,
+        source_service,
+        row.get("action"),
+        scope,
+        schema_versions,
+    )
+    .map_err(|_| RequestError::Repository("stored request action is invalid".to_owned()))?;
     let fingerprint: Vec<u8> = row.get("semantic_fingerprint");
     let fingerprint: [u8; 32] = fingerprint.try_into().map_err(|_| {
         RequestError::Repository("stored request fingerprint is invalid".to_owned())
@@ -159,10 +208,29 @@ fn accepted_request_from_row(row: &Row) -> Result<AcceptedRequest, RequestError>
     .map_err(|_| RequestError::Repository("stored acceptance time is invalid".to_owned()))
 }
 
-fn is_foreign_key_violation(error: &PostgresError) -> bool {
-    error
-        .as_db_error()
-        .is_some_and(|error| error.code() == &SqlState::FOREIGN_KEY_VIOLATION)
+/// Maps an INSERT's foreign-key violation to the specific reference that
+/// failed, rather than assuming it was always the source -- `accepted_requests`
+/// now also foreign-keys both schema version columns, and conflating "unknown
+/// source" with "unknown schema version" would misreport a perfectly valid
+/// caller as unauthenticated.
+fn foreign_key_violation_error(
+    error: &PostgresError,
+    source_service: ActorId,
+) -> Option<RequestError> {
+    let db_error = error.as_db_error()?;
+    if db_error.code() != &SqlState::FOREIGN_KEY_VIOLATION {
+        return None;
+    }
+    match db_error.constraint() {
+        Some("accepted_requests_source_service_id_fkey") => {
+            Some(RequestError::UnknownSource(source_service))
+        }
+        Some(
+            "accepted_requests_artifact_schema_version_fk"
+            | "accepted_requests_permission_policy_schema_version_fk",
+        ) => Some(RequestError::UnknownSchemaVersion),
+        _ => None,
+    }
 }
 
 fn repository_error(error: impl std::fmt::Display) -> RequestError {

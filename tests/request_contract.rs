@@ -4,12 +4,21 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use infernal_law::kernel::authority::{SchemaVersionId, SchemaVersionRefs, Scope};
 use infernal_law::kernel::identity::ActorId;
 use infernal_law::kernel::requests::{
     AcceptedRequest, ActionName, Request, RequestAcceptance, RequestError, RequestFingerprint,
     RequestId, RequestRepository, RequestService,
 };
 use uuid::Uuid;
+
+fn scope() -> Scope {
+    Scope::new("billing-invoice-4471").unwrap()
+}
+
+fn schema_versions() -> SchemaVersionRefs {
+    SchemaVersionRefs::new(SchemaVersionId::new(), SchemaVersionId::new())
+}
 
 #[derive(Default)]
 struct RequestState {
@@ -65,7 +74,8 @@ fn fingerprint(byte: u8) -> RequestFingerprint {
 #[test]
 fn request_creation_requires_no_destination_discovery_or_subscription() {
     let source = ActorId::new();
-    let request = Request::create(source, "billing.invoice.submit").unwrap();
+    let request =
+        Request::create(source, "billing.invoice.submit", scope(), schema_versions()).unwrap();
 
     assert_eq!(request.source_service(), source);
     assert_eq!(request.action().as_str(), "billing.invoice.submit");
@@ -77,7 +87,14 @@ fn stable_id_and_fields_can_be_restored_without_change() {
     let id = RequestId::new();
     let source = ActorId::new();
 
-    let restored = Request::restore(id, source, "catalog.item.publish").unwrap();
+    let restored = Request::restore(
+        id,
+        source,
+        "catalog.item.publish",
+        scope(),
+        schema_versions(),
+    )
+    .unwrap();
 
     assert_eq!(restored.id(), id);
     assert_eq!(restored.source_service(), source);
@@ -91,15 +108,15 @@ fn stable_id_and_fields_can_be_restored_without_change() {
 fn separate_requests_receive_separate_ids() {
     let source = ActorId::new();
 
-    let first = Request::create(source, "work.claim.create").unwrap();
-    let second = Request::create(source, "work.claim.create").unwrap();
+    let first = Request::create(source, "work.claim.create", scope(), schema_versions()).unwrap();
+    let second = Request::create(source, "work.claim.create", scope(), schema_versions()).unwrap();
 
     assert_ne!(first.id(), second.id());
 }
 
 #[test]
 fn malformed_action_cannot_enter_the_request_contract() {
-    let result = Request::create(ActorId::new(), "submit");
+    let result = Request::create(ActorId::new(), "submit", scope(), schema_versions());
 
     assert_eq!(result, Err(RequestError::InvalidActionName));
 }
@@ -107,7 +124,13 @@ fn malformed_action_cannot_enter_the_request_contract() {
 #[test]
 fn acceptance_is_durable_through_the_repository_contract_and_safe_to_retry() {
     let requests = RequestService::new(MemoryRequests::default());
-    let request = Request::create(ActorId::new(), "billing.invoice.submit").unwrap();
+    let request = Request::create(
+        ActorId::new(),
+        "billing.invoice.submit",
+        scope(),
+        schema_versions(),
+    )
+    .unwrap();
 
     let accepted = requests.accept(request.clone(), fingerprint(1)).unwrap();
     assert!(accepted.is_fresh());
@@ -127,7 +150,14 @@ fn request_id_cannot_be_rebound_to_another_action_or_fingerprint() {
     let requests = RequestService::new(MemoryRequests::default());
     let source = ActorId::new();
     let id = RequestId::new();
-    let original = Request::restore(id, source, "billing.invoice.submit").unwrap();
+    let original = Request::restore(
+        id,
+        source,
+        "billing.invoice.submit",
+        scope(),
+        schema_versions(),
+    )
+    .unwrap();
     requests.accept(original.clone(), fingerprint(2)).unwrap();
 
     assert_eq!(
@@ -136,7 +166,14 @@ fn request_id_cannot_be_rebound_to_another_action_or_fingerprint() {
     );
     assert_eq!(
         requests.accept(
-            Request::restore(id, source, "billing.invoice.cancel").unwrap(),
+            Request::restore(
+                id,
+                source,
+                "billing.invoice.cancel",
+                scope(),
+                schema_versions()
+            )
+            .unwrap(),
             fingerprint(2),
         ),
         Err(RequestError::RequestIdConflict(id))
@@ -147,8 +184,22 @@ fn request_id_cannot_be_rebound_to_another_action_or_fingerprint() {
 fn request_ids_are_scoped_to_the_authenticated_source() {
     let requests = RequestService::new(MemoryRequests::default());
     let id = RequestId::new();
-    let first = Request::restore(id, ActorId::new(), "work.item.submit").unwrap();
-    let second = Request::restore(id, ActorId::new(), "work.item.submit").unwrap();
+    let first = Request::restore(
+        id,
+        ActorId::new(),
+        "work.item.submit",
+        scope(),
+        schema_versions(),
+    )
+    .unwrap();
+    let second = Request::restore(
+        id,
+        ActorId::new(),
+        "work.item.submit",
+        scope(),
+        schema_versions(),
+    )
+    .unwrap();
 
     assert!(requests.accept(first, fingerprint(4)).unwrap().is_fresh());
     assert!(requests.accept(second, fingerprint(4)).unwrap().is_fresh());
@@ -158,7 +209,13 @@ fn request_ids_are_scoped_to_the_authenticated_source() {
 fn concurrent_acceptance_has_one_fresh_result_and_no_duplicate_record() {
     let repository = MemoryRequests::default();
     let requests = RequestService::new(repository.clone());
-    let request = Request::create(ActorId::new(), "work.item.submit").unwrap();
+    let request = Request::create(
+        ActorId::new(),
+        "work.item.submit",
+        scope(),
+        schema_versions(),
+    )
+    .unwrap();
     let outcomes: Vec<_> = (0..16)
         .map(|_| {
             let requests = requests.clone();

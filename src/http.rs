@@ -28,7 +28,9 @@ use crate::kernel::instance_registry::{InstanceRegistryRepository, RegisteredIns
 use crate::kernel::request_gate::{
     AdmittedServiceRequest, ServiceRequestGate, ServiceRequestGateError,
 };
-use crate::kernel::requests::ActionName;
+use crate::kernel::requests::{
+    ActionName, RequestAcceptance, RequestError, RequestId, RequestRepository, RequestService,
+};
 use crate::kernel::service_requests::{
     ServiceRequestAuthenticationError, ServiceRequestParts, SignedServiceRequest,
 };
@@ -41,12 +43,14 @@ use crate::wiring::Application;
 use self::enrollment_dto::{
     EnrollmentErrorResponse, EnrollmentSubmissionRequest, EnrollmentSuccessResponse,
 };
+use self::request_dto::{AcceptedRequestResponse, SubmitRequestRequest};
 use self::schema_dto::{PublishSchemaRequest, SchemaVersionResponse};
 use self::subscription_dto::{
     CreateSubscriptionRequest, SubscriptionListResponse, SubscriptionResponse,
 };
 
 pub mod enrollment_dto;
+pub mod request_dto;
 pub mod schema_dto;
 pub mod subscription_dto;
 
@@ -204,6 +208,34 @@ where
     }
 }
 
+/// Gates ILK-003 request submission behind a real ILK-002 authority
+/// decision, built by the caller from the request's own action, scope, and
+/// schema versions. Unlike [`SubscriptionAuthorizer`], this is exactly the
+/// artifact-bearing case ILK-002's schema-version machinery exists for, so
+/// no `no_artifact_schema_versions` sentinel is involved.
+pub trait RequestAuthorizer {
+    fn authorize_request(
+        &self,
+        facts: PolicyFacts,
+        now: i64,
+    ) -> Result<AuthorityDecision, AuthorityError>;
+}
+
+impl<R, E, D> RequestAuthorizer for AuthorityService<R, E, D>
+where
+    R: AuthorityRepository,
+    E: PolicyEvaluator,
+    D: AuthorityDecisionRecorder,
+{
+    fn authorize_request(
+        &self,
+        facts: PolicyFacts,
+        now: i64,
+    ) -> Result<AuthorityDecision, AuthorityError> {
+        self.authorize(facts, now)
+    }
+}
+
 pub fn serve(application: Application) -> std::io::Result<()> {
     let address = env::var("BIND_ADDRESS").unwrap_or_else(|_| DEFAULT_ADDRESS.to_owned());
     let port = env::var("PORT").unwrap_or_else(|_| DEFAULT_PORT.to_owned());
@@ -279,7 +311,8 @@ fn dispatch(request: ParsedRequest, application: &Application) -> Response {
             Ok(admitted) => admitted,
             Err(response) => return response,
         };
-        let service_id = admitted.verified().service_id();
+        let verified = admitted.verified();
+        let service_id = verified.service_id();
         let path = request.path.split('?').next().unwrap_or(&request.path);
         if path == "/v1/authority/schemas" {
             return publish_schema(&request, service_id, application.schemas());
@@ -288,6 +321,16 @@ fn dispatch(request: ParsedRequest, application: &Application) -> Response {
             Ok(authority) => authority,
             Err(response) => return response,
         };
+        if path == "/v1/requests" || path.starts_with("/v1/requests/") {
+            let envelope_request_id = RequestId::from_uuid(verified.request_id());
+            return request_route(
+                &request,
+                service_id,
+                envelope_request_id,
+                application.requests(),
+                &authority,
+            );
+        }
         return subscription_route(
             &request,
             service_id,
@@ -415,6 +458,34 @@ impl GovernedErrorResponse {
             message: "schema name is owned by a different service",
         }
     }
+
+    const fn invalid_request() -> Self {
+        Self {
+            code: "invalid_request",
+            message: "request submission is invalid",
+        }
+    }
+
+    const fn request_conflict() -> Self {
+        Self {
+            code: "request_conflict",
+            message: "request ID is bound to different content",
+        }
+    }
+
+    const fn request_not_found() -> Self {
+        Self {
+            code: "request_not_found",
+            message: "request was not found",
+        }
+    }
+
+    const fn request_not_authorized() -> Self {
+        Self {
+            code: "request_not_authorized",
+            message: "request is not authorized",
+        }
+    }
 }
 
 fn authentication_rejected() -> Response {
@@ -455,6 +526,8 @@ fn is_governed_route(path: &str) -> bool {
     path == "/v1/subscriptions"
         || path.starts_with("/v1/subscriptions/")
         || path == "/v1/authority/schemas"
+        || path == "/v1/requests"
+        || path.starts_with("/v1/requests/")
 }
 
 fn is_supported_governed_method(method: &str, path: &str) -> bool {
@@ -462,6 +535,8 @@ fn is_supported_governed_method(method: &str, path: &str) -> bool {
     (path == "/v1/subscriptions" && matches!(method, "GET" | "POST"))
         || (path.starts_with("/v1/subscriptions/") && method == "DELETE")
         || (path == "/v1/authority/schemas" && method == "POST")
+        || (path == "/v1/requests" && method == "POST")
+        || (path.starts_with("/v1/requests/") && method == "GET")
 }
 
 /// Builds the configured `HttpPolicyEvaluator`-backed authority service, or
@@ -654,6 +729,137 @@ fn subscription_error_response(error: &SubscriptionError) -> Response {
         }
         SubscriptionError::UnknownService(_) => authentication_rejected(),
         SubscriptionError::AlreadyExists(_) | SubscriptionError::Repository(_) => json_response(
+            "503 Service Unavailable",
+            &GovernedErrorResponse::internal_error(),
+        ),
+    }
+}
+
+/// Dispatches an already-authenticated governed request to ILK-003's
+/// request-submission operations. `service_id` is the caller's own
+/// verified identity, never a request-body field. Unlike ILK-010
+/// subscription management, submission is authorized against the
+/// request's own real action, scope, and schema versions -- the
+/// artifact-bearing case ILK-002 was designed for.
+fn request_route<R: RequestRepository, A: RequestAuthorizer>(
+    request: &ParsedRequest,
+    service_id: ActorId,
+    envelope_request_id: RequestId,
+    requests: &RequestService<R>,
+    authority: &A,
+) -> Response {
+    let path = request.path.split('?').next().unwrap_or(&request.path);
+    if path == "/v1/requests" {
+        return match request.method.as_str() {
+            "POST" => submit_request(
+                request,
+                service_id,
+                envelope_request_id,
+                requests,
+                authority,
+            ),
+            _ => text_response("405 Method Not Allowed", "method not allowed\n"),
+        };
+    }
+    match path.strip_prefix("/v1/requests/") {
+        Some(id) => find_request(id, service_id, requests),
+        None => text_response("404 Not Found", "not found\n"),
+    }
+}
+
+fn submit_request<R: RequestRepository, A: RequestAuthorizer>(
+    request: &ParsedRequest,
+    service_id: ActorId,
+    envelope_request_id: RequestId,
+    requests: &RequestService<R>,
+    authority: &A,
+) -> Response {
+    if !request
+        .content_type
+        .as_deref()
+        .is_some_and(is_json_content_type)
+    {
+        return json_response(
+            "415 Unsupported Media Type",
+            &GovernedErrorResponse::invalid_request(),
+        );
+    }
+    let dto: SubmitRequestRequest = match serde_json::from_slice(&request.body) {
+        Ok(dto) => dto,
+        Err(_) => {
+            return json_response("400 Bad Request", &GovernedErrorResponse::invalid_request());
+        }
+    };
+    let submitted = match dto.into_request(service_id, envelope_request_id) {
+        Ok(request) => request,
+        Err(_) => {
+            return json_response("400 Bad Request", &GovernedErrorResponse::invalid_request());
+        }
+    };
+    let now = unix_time();
+    let facts = PolicyFacts::for_request_acceptance(
+        service_id,
+        submitted.action().clone(),
+        submitted.scope().clone(),
+        submitted.schema_versions(),
+    );
+    match authority.authorize_request(facts, now) {
+        Ok(decision) if decision.is_allowed() => {}
+        Ok(_) => {
+            return json_response(
+                "403 Forbidden",
+                &GovernedErrorResponse::request_not_authorized(),
+            );
+        }
+        Err(_) => {
+            return json_response(
+                "503 Service Unavailable",
+                &GovernedErrorResponse::internal_error(),
+            );
+        }
+    }
+    let fingerprint = submitted.fingerprint();
+    match requests.accept(submitted, fingerprint) {
+        Ok(RequestAcceptance::Accepted(record)) => {
+            json_response("201 Created", &AcceptedRequestResponse::from(&record))
+        }
+        Ok(RequestAcceptance::SafeRetry(record)) => {
+            json_response("200 OK", &AcceptedRequestResponse::from(&record))
+        }
+        Err(error) => request_error_response(&error),
+    }
+}
+
+fn find_request<R: RequestRepository>(
+    id: &str,
+    service_id: ActorId,
+    requests: &RequestService<R>,
+) -> Response {
+    let request_id: RequestId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return json_response("400 Bad Request", &GovernedErrorResponse::invalid_request());
+        }
+    };
+    match requests.find(service_id, request_id) {
+        Ok(Some(record)) => json_response("200 OK", &AcceptedRequestResponse::from(&record)),
+        Ok(None) => json_response("404 Not Found", &GovernedErrorResponse::request_not_found()),
+        Err(error) => request_error_response(&error),
+    }
+}
+
+fn request_error_response(error: &RequestError) -> Response {
+    match error {
+        RequestError::InvalidRequestId
+        | RequestError::InvalidActionName
+        | RequestError::InvalidAcceptedAt => {
+            json_response("400 Bad Request", &GovernedErrorResponse::invalid_request())
+        }
+        RequestError::RequestIdConflict(_) => {
+            json_response("409 Conflict", &GovernedErrorResponse::request_conflict())
+        }
+        RequestError::UnknownSource(_) => authentication_rejected(),
+        RequestError::UnknownSchemaVersion | RequestError::Repository(_) => json_response(
             "503 Service Unavailable",
             &GovernedErrorResponse::internal_error(),
         ),
@@ -1817,6 +2023,340 @@ mod tests {
             let response = publish_schema(&request, ActorId::new(), &schemas);
 
             assert_eq!(response.status, "409 Conflict");
+        }
+    }
+
+    mod request_routes {
+        use std::sync::{Arc, Mutex};
+
+        use super::super::*;
+        use crate::kernel::authority::{
+            DecisionId, PolicyBundleVersion, SchemaVersionId, SchemaVersionRefs, Verdict,
+        };
+        use crate::kernel::requests::{AcceptedRequest, Request};
+
+        #[derive(Clone, Default)]
+        struct MemoryRequests(Arc<Mutex<Vec<AcceptedRequest>>>);
+
+        impl RequestRepository for MemoryRequests {
+            fn accept(
+                &self,
+                request: Request,
+                fingerprint: crate::kernel::requests::RequestFingerprint,
+            ) -> Result<RequestAcceptance, RequestError> {
+                let mut records = self.0.lock().unwrap();
+                if let Some(stored) = records
+                    .iter()
+                    .find(|record| record.request().id() == request.id())
+                {
+                    return if stored.request() == &request && stored.fingerprint() == fingerprint {
+                        Ok(RequestAcceptance::SafeRetry(stored.clone()))
+                    } else {
+                        Err(RequestError::RequestIdConflict(request.id()))
+                    };
+                }
+                let record = AcceptedRequest::restore(request, fingerprint, records.len() as i64)?;
+                records.push(record.clone());
+                Ok(RequestAcceptance::Accepted(record))
+            }
+
+            fn find(
+                &self,
+                source_service: ActorId,
+                request_id: RequestId,
+            ) -> Result<Option<AcceptedRequest>, RequestError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|record| {
+                        record.request().source_service() == source_service
+                            && record.request().id() == request_id
+                    })
+                    .cloned())
+            }
+        }
+
+        struct FixedAuthority(Result<bool, ()>);
+
+        impl FixedAuthority {
+            fn allow() -> Self {
+                Self(Ok(true))
+            }
+
+            fn deny() -> Self {
+                Self(Ok(false))
+            }
+
+            fn unavailable() -> Self {
+                Self(Err(()))
+            }
+        }
+
+        impl RequestAuthorizer for FixedAuthority {
+            fn authorize_request(
+                &self,
+                facts: PolicyFacts,
+                now: i64,
+            ) -> Result<AuthorityDecision, AuthorityError> {
+                let allowed = self
+                    .0
+                    .map_err(|()| AuthorityError::Evaluator("fixed authority error".to_owned()))?;
+                let verdict = if allowed {
+                    Verdict::Allow
+                } else {
+                    Verdict::Deny
+                };
+                Ok(AuthorityDecision::restore(
+                    DecisionId::new(),
+                    facts,
+                    verdict,
+                    ActorId::new(),
+                    Some(PolicyBundleVersion::new("test").unwrap()),
+                    now,
+                ))
+            }
+        }
+
+        fn submission_body() -> String {
+            format!(
+                r#"{{"action":"billing.invoice.submit","scope":"invoice-4471","artifact_schema_version_id":"{}","permission_policy_schema_version_id":"{}"}}"#,
+                SchemaVersionId::new(),
+                SchemaVersionId::new(),
+            )
+        }
+
+        fn parsed_request(method: &str, path: &str, body: &[u8]) -> ParsedRequest {
+            ParsedRequest {
+                method: method.to_owned(),
+                path: path.to_owned(),
+                authority: Some("kernel.example.test".to_owned()),
+                content_type: Some("application/json".to_owned()),
+                content_digest: None,
+                service_id: None,
+                instance_id: None,
+                request_id: None,
+                signature_input: None,
+                signature: None,
+                body: body.to_vec(),
+            }
+        }
+
+        #[test]
+        fn submit_returns_201_with_the_accepted_request() {
+            let requests = RequestService::new(MemoryRequests::default());
+            let service_id = ActorId::new();
+            let request = parsed_request("POST", "/v1/requests", submission_body().as_bytes());
+
+            let response = submit_request(
+                &request,
+                service_id,
+                RequestId::new(),
+                &requests,
+                &FixedAuthority::allow(),
+            );
+
+            assert_eq!(response.status, "201 Created");
+            assert!(response.body.contains("billing.invoice.submit"));
+            assert!(response.body.contains(&service_id.to_string()));
+        }
+
+        #[test]
+        fn submit_retrying_under_the_same_envelope_request_id_returns_200() {
+            let requests = RequestService::new(MemoryRequests::default());
+            let service_id = ActorId::new();
+            let body = submission_body();
+            let request = parsed_request("POST", "/v1/requests", body.as_bytes());
+            let envelope_request_id = RequestId::new();
+            let first = submit_request(
+                &request,
+                service_id,
+                envelope_request_id,
+                &requests,
+                &FixedAuthority::allow(),
+            );
+            assert_eq!(first.status, "201 Created");
+
+            let retry = submit_request(
+                &request,
+                service_id,
+                envelope_request_id,
+                &requests,
+                &FixedAuthority::allow(),
+            );
+
+            assert_eq!(retry.status, "200 OK");
+        }
+
+        #[test]
+        fn submit_is_forbidden_when_authority_denies() {
+            let requests = RequestService::new(MemoryRequests::default());
+            let request = parsed_request("POST", "/v1/requests", submission_body().as_bytes());
+
+            let response = submit_request(
+                &request,
+                ActorId::new(),
+                RequestId::new(),
+                &requests,
+                &FixedAuthority::deny(),
+            );
+
+            assert_eq!(response.status, "403 Forbidden");
+        }
+
+        #[test]
+        fn submit_fails_closed_when_the_evaluator_is_unreachable() {
+            let requests = RequestService::new(MemoryRequests::default());
+            let request = parsed_request("POST", "/v1/requests", submission_body().as_bytes());
+
+            let response = submit_request(
+                &request,
+                ActorId::new(),
+                RequestId::new(),
+                &requests,
+                &FixedAuthority::unavailable(),
+            );
+
+            assert_eq!(response.status, "503 Service Unavailable");
+        }
+
+        #[test]
+        fn submit_rejects_a_non_json_content_type() {
+            let requests = RequestService::new(MemoryRequests::default());
+            let mut request = parsed_request("POST", "/v1/requests", b"{}");
+            request.content_type = Some("text/plain".to_owned());
+
+            let response = submit_request(
+                &request,
+                ActorId::new(),
+                RequestId::new(),
+                &requests,
+                &FixedAuthority::allow(),
+            );
+
+            assert_eq!(response.status, "415 Unsupported Media Type");
+        }
+
+        #[test]
+        fn submit_rejects_malformed_json() {
+            let requests = RequestService::new(MemoryRequests::default());
+            let request = parsed_request("POST", "/v1/requests", b"not json");
+
+            let response = submit_request(
+                &request,
+                ActorId::new(),
+                RequestId::new(),
+                &requests,
+                &FixedAuthority::allow(),
+            );
+
+            assert_eq!(response.status, "400 Bad Request");
+        }
+
+        #[test]
+        fn find_returns_the_callers_own_accepted_request() {
+            let requests = RequestService::new(MemoryRequests::default());
+            let service_id = ActorId::new();
+            let submitted = Request::create(
+                service_id,
+                "billing.invoice.submit",
+                Scope::new("invoice-4471").unwrap(),
+                SchemaVersionRefs::new(SchemaVersionId::new(), SchemaVersionId::new()),
+            )
+            .unwrap();
+            let fingerprint = submitted.fingerprint();
+            let accepted = requests.accept(submitted, fingerprint).unwrap();
+            let request_id = accepted.record().request().id();
+
+            let response = find_request(&request_id.to_string(), service_id, &requests);
+
+            assert_eq!(response.status, "200 OK");
+            assert!(response.body.contains("billing.invoice.submit"));
+        }
+
+        #[test]
+        fn find_hides_another_services_request_as_not_found() {
+            let requests = RequestService::new(MemoryRequests::default());
+            let owner = ActorId::new();
+            let stranger = ActorId::new();
+            let accepted = requests
+                .accept(
+                    Request::create(
+                        owner,
+                        "billing.invoice.submit",
+                        Scope::new("invoice-4471").unwrap(),
+                        SchemaVersionRefs::new(SchemaVersionId::new(), SchemaVersionId::new()),
+                    )
+                    .unwrap(),
+                    Request::create(
+                        owner,
+                        "billing.invoice.submit",
+                        Scope::new("invoice-4471").unwrap(),
+                        SchemaVersionRefs::new(SchemaVersionId::new(), SchemaVersionId::new()),
+                    )
+                    .unwrap()
+                    .fingerprint(),
+                )
+                .unwrap();
+
+            let response = find_request(
+                &accepted.record().request().id().to_string(),
+                stranger,
+                &requests,
+            );
+
+            assert_eq!(response.status, "404 Not Found");
+        }
+
+        #[test]
+        fn find_rejects_a_malformed_request_id() {
+            let requests = RequestService::new(MemoryRequests::default());
+
+            let response = find_request("not-a-uuid", ActorId::new(), &requests);
+
+            assert_eq!(response.status, "400 Bad Request");
+        }
+
+        #[test]
+        fn route_dispatches_by_method_and_path() {
+            let requests = RequestService::new(MemoryRequests::default());
+            let service_id = ActorId::new();
+            let submit_req = parsed_request("POST", "/v1/requests", submission_body().as_bytes());
+
+            let submitted = request_route(
+                &submit_req,
+                service_id,
+                RequestId::new(),
+                &requests,
+                &FixedAuthority::allow(),
+            );
+            assert_eq!(submitted.status, "201 Created");
+
+            let probe = Request::create(
+                service_id,
+                "noop.probe",
+                Scope::wildcard(),
+                no_artifact_schema_versions(),
+            )
+            .unwrap();
+            let probe_fingerprint = probe.fingerprint();
+            let request_id = requests
+                .accept(probe, probe_fingerprint)
+                .unwrap()
+                .record()
+                .request()
+                .id();
+
+            let find_req = parsed_request("GET", &format!("/v1/requests/{request_id}"), b"");
+            let found = request_route(
+                &find_req,
+                service_id,
+                RequestId::new(),
+                &requests,
+                &FixedAuthority::allow(),
+            );
+            assert_eq!(found.status, "200 OK");
         }
     }
 }

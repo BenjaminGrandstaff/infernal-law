@@ -496,13 +496,37 @@ Implementation status:
   service, and validated namespaced action without a concrete destination.
 - Complete: the core contract has an independently runnable test and exposes
   no field mutation operations.
-- Partial foundation: the implemented replay layer permanently binds a source
-  service and request ID to a semantic fingerprint.
+- Complete: the artifact descriptor and permission-policy schema reference
+  this invariant list requires. `Request` carries `scope`/`schema_versions`
+  using the same `authority::Scope`/`SchemaVersionRefs` types ILK-002
+  evaluates against (`PolicyFacts::for_request_acceptance`), so there is one
+  validated representation of each, not a parallel one that could drift.
+  `Request::fingerprint()` deterministically hashes all four immutable
+  fields (source, action, scope, schema versions), length-prefixed so no
+  combination of values can collide by concatenation.
 - Complete: atomic PostgreSQL acceptance scoped to `(source_service_id,
   request_id)`, safe-retry classification, conflict rejection on rebinding,
-  and append-only acceptance audit surviving process restart.
-- Pending: authenticated-envelope construction, artifact descriptor, schema
-  references, correlation relationships, exclusive-group and
+  and append-only acceptance audit surviving process restart. Both schema
+  version columns are mandatory, foreign-keyed to `authority_schema_versions`,
+  and a foreign-key violation there is now reported as
+  `RequestError::UnknownSchemaVersion` (matched by Postgres constraint name),
+  distinct from `UnknownSource` -- conflating the two would misreport a
+  valid caller as unauthenticated.
+- Complete: authenticated-envelope construction. `POST /v1/requests`
+  (`src/http/request_dto.rs`) builds the request from the caller's own
+  verified identity and, notably, the *signed envelope's own*
+  `infernal-request-id` (`VerifiedServiceRequest::request_id`) as the
+  durable ILK-003 request ID -- not a body field, and not freshly minted
+  per call. The caller already controls that value and retries a lost
+  response with it unchanged, so reusing it is what makes submission
+  idempotent under retry without a second, redundant identifier. Submission
+  is authorized by a real ILK-002 decision built from the request's own
+  action, scope, and schema versions -- the artifact-bearing case that
+  machinery exists for, unlike ILK-010 subscription management's
+  `NO_ARTIFACT_SCHEMA_VERSION` sentinel. `GET /v1/requests/{id}` reads back
+  only the caller's own accepted request; another service's request looks
+  identical to one that does not exist.
+- Pending: correlation relationships, exclusive-group and
   inclusive-destination route records and transition history, and
   subscription-triggered backlog routing.
 

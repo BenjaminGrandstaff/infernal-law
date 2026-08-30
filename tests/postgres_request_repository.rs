@@ -4,12 +4,50 @@
 use std::env;
 use std::thread;
 
+use infernal_law::infrastructure::postgres_authority_repository::PostgresAuthorityRepository;
+use infernal_law::kernel::authority::{
+    ContentDigest, SchemaKind, SchemaName, SchemaRepository, SchemaVersionId, SchemaVersionRefs,
+    Scope,
+};
 use infernal_law::kernel::identity::{ActorId, ActorKind};
 use infernal_law::kernel::requests::{
     Request, RequestAcceptance, RequestError, RequestFingerprint, RequestId,
 };
 use infernal_law::wiring::Application;
 use r2d2_postgres::postgres::{Client, NoTls};
+
+fn scope() -> Scope {
+    Scope::new("invoice-4471").unwrap()
+}
+
+fn publish_schema_versions(
+    application: &Application,
+    owner: ActorId,
+    name: &str,
+    discriminant: u8,
+) -> SchemaVersionRefs {
+    let repository = PostgresAuthorityRepository::new(application.database().clone());
+    let name = SchemaName::new(name).unwrap();
+    let artifact = repository
+        .publish(
+            SchemaKind::Artifact,
+            name.clone(),
+            owner,
+            ContentDigest::from_bytes([discriminant; 32]),
+            1,
+        )
+        .unwrap();
+    let permission_policy = repository
+        .publish(
+            SchemaKind::PermissionPolicy,
+            name,
+            owner,
+            ContentDigest::from_bytes([discriminant; 32]),
+            1,
+        )
+        .unwrap();
+    SchemaVersionRefs::new(artifact.version().id(), permission_policy.version().id())
+}
 
 #[test]
 #[ignore = "requires DATABASE_URL, INFERNAL_LAW_SERVICE_ID, and PostgreSQL with pgvector"]
@@ -19,7 +57,15 @@ fn accepted_requests_survive_restart_and_reject_duplicate_or_destructive_work() 
         .identities()
         .create(ActorKind::Service, "Request persistence integration source")
         .unwrap();
-    let request = Request::create(source.id(), "billing.invoice.submit").unwrap();
+    let schema_versions =
+        publish_schema_versions(&first_process, source.id(), "test.request-persistence", 21);
+    let request = Request::create(
+        source.id(),
+        "billing.invoice.submit",
+        scope(),
+        schema_versions,
+    )
+    .unwrap();
     let fingerprint = RequestFingerprint::from_bytes([11; 32]);
 
     let accepted = first_process
@@ -45,8 +91,14 @@ fn accepted_requests_survive_restart_and_reject_duplicate_or_destructive_work() 
     assert!(matches!(retry, RequestAcceptance::SafeRetry(_)));
     assert_eq!(retry.record(), accepted.record());
 
-    let conflicting =
-        Request::restore(request.id(), source.id(), "billing.invoice.cancel").unwrap();
+    let conflicting = Request::restore(
+        request.id(),
+        source.id(),
+        "billing.invoice.cancel",
+        scope(),
+        schema_versions,
+    )
+    .unwrap();
     assert_eq!(
         second_process
             .requests()
@@ -57,10 +109,32 @@ fn accepted_requests_survive_restart_and_reject_duplicate_or_destructive_work() 
     let unknown_source = ActorId::new();
     assert_eq!(
         second_process.requests().accept(
-            Request::create(unknown_source, "billing.invoice.submit").unwrap(),
+            Request::create(
+                unknown_source,
+                "billing.invoice.submit",
+                scope(),
+                schema_versions,
+            )
+            .unwrap(),
             fingerprint,
         ),
         Err(RequestError::UnknownSource(unknown_source))
+    );
+
+    let unknown_schema_versions =
+        SchemaVersionRefs::new(SchemaVersionId::new(), SchemaVersionId::new());
+    assert_eq!(
+        second_process.requests().accept(
+            Request::create(
+                source.id(),
+                "billing.invoice.resubmit",
+                scope(),
+                unknown_schema_versions,
+            )
+            .unwrap(),
+            fingerprint,
+        ),
+        Err(RequestError::UnknownSchemaVersion)
     );
 
     assert_concurrent_acceptance(&second_process, source.id());
@@ -68,7 +142,9 @@ fn accepted_requests_survive_restart_and_reject_duplicate_or_destructive_work() 
 }
 
 fn assert_concurrent_acceptance(application: &Application, source: ActorId) {
-    let request = Request::create(source, "work.item.submit").unwrap();
+    let schema_versions =
+        publish_schema_versions(application, source, "test.request-concurrency", 22);
+    let request = Request::create(source, "work.item.submit", scope(), schema_versions).unwrap();
     let requests = application.requests().clone();
     let outcomes: Vec<_> = (0..8)
         .map(|_| {

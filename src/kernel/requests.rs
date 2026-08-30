@@ -6,9 +6,11 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
 
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::Requirement;
+use super::authority::{SchemaVersionRefs, Scope};
 use super::identity::ActorId;
 
 pub const REQUIREMENT: Requirement = Requirement::new(
@@ -98,11 +100,20 @@ impl FromStr for ActionName {
 /// records that identity but does not itself authenticate or authorize it.
 /// Concrete destinations belong to kernel-created request routes, so the source
 /// neither selects nor discovers destination services.
+///
+/// `scope` and `schema_versions` are the same artifact descriptor and
+/// permission-policy schema reference ILK-002 authority evaluates the
+/// request against (`PolicyFacts::for_request_acceptance`) -- ILK-003
+/// requires them on every request, and reusing `authority::Scope`/
+/// `SchemaVersionRefs` here means there is exactly one validated
+/// representation of each, not a parallel one that could drift.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Request {
     id: RequestId,
     source_service: ActorId,
     action: ActionName,
+    scope: Scope,
+    schema_versions: SchemaVersionRefs,
 }
 
 /// The digest of the complete semantic request envelope. It binds fields that
@@ -220,19 +231,34 @@ where
 }
 
 impl Request {
-    pub fn create(source_service: ActorId, action: &str) -> Result<Self, RequestError> {
-        Self::restore(RequestId::new(), source_service, action)
+    pub fn create(
+        source_service: ActorId,
+        action: &str,
+        scope: Scope,
+        schema_versions: SchemaVersionRefs,
+    ) -> Result<Self, RequestError> {
+        Self::restore(
+            RequestId::new(),
+            source_service,
+            action,
+            scope,
+            schema_versions,
+        )
     }
 
     pub fn restore(
         id: RequestId,
         source_service: ActorId,
         action: &str,
+        scope: Scope,
+        schema_versions: SchemaVersionRefs,
     ) -> Result<Self, RequestError> {
         Ok(Self {
             id,
             source_service,
             action: ActionName::new(action)?,
+            scope,
+            schema_versions,
         })
     }
 
@@ -247,6 +273,41 @@ impl Request {
     pub const fn action(&self) -> &ActionName {
         &self.action
     }
+
+    pub const fn scope(&self) -> &Scope {
+        &self.scope
+    }
+
+    pub const fn schema_versions(&self) -> SchemaVersionRefs {
+        self.schema_versions
+    }
+
+    /// Deterministically computes this request's semantic fingerprint from
+    /// its own immutable fields. Two `Request`s with identical source,
+    /// action, scope, and schema versions always fingerprint identically;
+    /// any difference changes it, so `RequestRepository::accept` can tell a
+    /// safe retry of the same semantic request from an attempt to rebind
+    /// its ID to different content. Fields are length-prefixed before
+    /// hashing so no combination of values can collide by concatenation.
+    pub fn fingerprint(&self) -> RequestFingerprint {
+        let mut hasher = Sha256::new();
+        hasher.update(self.source_service.as_uuid().as_bytes());
+        hash_field(&mut hasher, self.action.as_str().as_bytes());
+        hash_field(&mut hasher, self.scope.as_str().as_bytes());
+        hasher.update(self.schema_versions.artifact().as_uuid().as_bytes());
+        hasher.update(
+            self.schema_versions
+                .permission_policy()
+                .as_uuid()
+                .as_bytes(),
+        );
+        RequestFingerprint::from_bytes(hasher.finalize().into())
+    }
+}
+
+fn hash_field(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
 }
 
 fn is_valid_action_name(value: &str) -> bool {
@@ -282,6 +343,7 @@ pub enum RequestError {
     RequestIdConflict(RequestId),
     Repository(String),
     UnknownSource(ActorId),
+    UnknownSchemaVersion,
 }
 
 impl Display for RequestError {
@@ -301,6 +363,9 @@ impl Display for RequestError {
             Self::UnknownSource(id) => {
                 write!(formatter, "source service identity {id} was not found")
             }
+            Self::UnknownSchemaVersion => {
+                formatter.write_str("referenced schema version was not found")
+            }
         }
     }
 }
@@ -309,7 +374,17 @@ impl Error for RequestError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionName, MAX_ACTION_NAME_LENGTH, REQUIREMENT, RequestError};
+    use super::{ActionName, MAX_ACTION_NAME_LENGTH, REQUIREMENT, Request, RequestError};
+    use crate::kernel::authority::{SchemaVersionId, SchemaVersionRefs, Scope};
+    use crate::kernel::identity::ActorId;
+
+    fn schema_versions() -> SchemaVersionRefs {
+        SchemaVersionRefs::new(SchemaVersionId::new(), SchemaVersionId::new())
+    }
+
+    fn request(source: ActorId, action: &str, scope: &str, versions: SchemaVersionRefs) -> Request {
+        Request::create(source, action, Scope::new(scope).unwrap(), versions).unwrap()
+    }
 
     #[test]
     fn traces_to_requests_requirement() {
@@ -345,5 +420,83 @@ mod tests {
             ActionName::new(&oversized),
             Err(RequestError::InvalidActionName)
         );
+    }
+
+    #[test]
+    fn fingerprint_is_deterministic_for_identical_content() {
+        let source = ActorId::new();
+        let versions = schema_versions();
+        let first = request(source, "billing.invoice.submit", "invoice-1", versions);
+        let second = request(source, "billing.invoice.submit", "invoice-1", versions);
+
+        assert_eq!(first.fingerprint(), second.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_changes_with_the_action() {
+        let source = ActorId::new();
+        let versions = schema_versions();
+        let first = request(source, "billing.invoice.submit", "invoice-1", versions);
+        let second = request(source, "billing.invoice.cancel", "invoice-1", versions);
+
+        assert_ne!(first.fingerprint(), second.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_changes_with_the_scope() {
+        let source = ActorId::new();
+        let versions = schema_versions();
+        let first = request(source, "billing.invoice.submit", "invoice-1", versions);
+        let second = request(source, "billing.invoice.submit", "invoice-2", versions);
+
+        assert_ne!(first.fingerprint(), second.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_changes_with_the_schema_versions() {
+        let source = ActorId::new();
+        let first = request(
+            source,
+            "billing.invoice.submit",
+            "invoice-1",
+            schema_versions(),
+        );
+        let second = request(
+            source,
+            "billing.invoice.submit",
+            "invoice-1",
+            schema_versions(),
+        );
+
+        assert_ne!(first.fingerprint(), second.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_changes_with_the_source() {
+        let versions = schema_versions();
+        let first = request(
+            ActorId::new(),
+            "billing.invoice.submit",
+            "invoice-1",
+            versions,
+        );
+        let second = request(
+            ActorId::new(),
+            "billing.invoice.submit",
+            "invoice-1",
+            versions,
+        );
+
+        assert_ne!(first.fingerprint(), second.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_cannot_be_confused_by_concatenation_across_field_boundaries() {
+        let source = ActorId::new();
+        let versions = schema_versions();
+        let first = request(source, "billing.ab", "cd", versions);
+        let second = request(source, "billing.a", "bcd", versions);
+
+        assert_ne!(first.fingerprint(), second.fingerprint());
     }
 }

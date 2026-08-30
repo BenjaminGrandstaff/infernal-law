@@ -47,6 +47,16 @@ It listens on `0.0.0.0:8080` by default and provides:
   "<base64url>"}`) owned by the caller's own verified identity. Publishing
   never activates a schema or grants its publisher permission; a different
   service already owning `name` under that `kind` is rejected as `409`.
+- `POST /v1/requests`, `GET /v1/requests/{id}` — ILK-003 request submission
+  and lookup (`{"action": "...", "scope": "...", "artifact_schema_version_id":
+  "...", "permission_policy_schema_version_id": "..."}`). The durable request
+  ID is the signed envelope's own `Infernal-Request-Id`, not a body field, so
+  retrying a lost response under the same signed request is a safe, idempotent
+  `200` rather than a fresh `201` or a conflict. Submission requires a real
+  ILK-002 authority decision built from the request's own action, scope, and
+  schema versions (the same `POLICY_EVALUATOR_*` configuration as
+  subscriptions above) — this is the artifact-bearing case that machinery
+  exists for. `GET` reads back only the caller's own request.
 
 Set `BIND_ADDRESS` or `PORT` to change the listener configuration. Startup
 fails if `DATABASE_URL` or `INFERNAL_LAW_SERVICE_ID` is absent, the service ID

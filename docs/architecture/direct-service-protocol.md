@@ -203,7 +203,22 @@ evaluator, or a deny verdict, fails closed rather than an implicit allow.
 An `allow` additionally requires the same out-of-band provisioning grants
 and schema status already need — see
 [ADR-0013](decisions/0013-external-stateless-policy-evaluator-for-authority.md)
-and `NO_ARTIFACT_SCHEMA_VERSION` in `src/kernel/authority.rs`. Public health, initial
+and `NO_ARTIFACT_SCHEMA_VERSION` in `src/kernel/authority.rs`.
+
+`POST /v1/authority/schemas` and `POST`/`GET /v1/requests` are wired
+through the same boundary. Schema publication needs authentication only,
+per ILK-002's own wording that publishing never grants permission.
+Request submission (`POST /v1/requests`) runs the same evaluate-and-record
+step as subscription create/disable, but against the request's own real
+action, scope, and schema versions rather than the `NO_ARTIFACT_SCHEMA_VERSION`
+sentinel — the artifact-bearing case ILK-002 was designed for. Its durable
+ILK-003 request ID is the signed envelope's own `Infernal-Request-Id`
+(`VerifiedServiceRequest::request_id`), not a request-body field, so
+retrying a lost response under the same signed request is a safe,
+idempotent `200` rather than a fresh `201` or a rebinding conflict.
+`GET /v1/requests/{id}` reads back only the caller's own accepted request.
+
+Public health, initial
 enrollment, and the kernel-identity routes remain outside governed-request
 authentication by design. The kernel-identity route
 (`GET /v1/kernel-identity`) publishes this process's current public signing
