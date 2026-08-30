@@ -49,6 +49,24 @@ spec:
                 secretKeyRef:
                   name: infernal-law-database
                   key: url
+            # In-cluster DNS name of infernal-inquisitor-simple's own
+            # Service. Must be provisioned as an identities row out of
+            # band (see NO_ARTIFACT_SCHEMA_VERSION's own doc comment for
+            # why every ILK-002-gated route needs one) before ILK-002
+            # authority decisions (request acceptance, subscription
+            # create/disable) will do anything but fail closed.
+            - name: POLICY_EVALUATOR_AUTHORITY
+              value: "infernal-inquisitor-simple"
+            - name: POLICY_EVALUATOR_ID
+              value: "00000000-0000-4000-8000-000000000005"
+            # infernal-inquisitor-simple's own tls-proxy sidecar uses a
+            # self-signed certificate for local/test deployments (see
+            # that repo's README), which this process must be told to
+            # trust explicitly -- see the evaluator-ca-cert volume below.
+            # Omit both for an evaluator with an ordinary
+            # publicly-trusted certificate.
+            - name: POLICY_EVALUATOR_CA_CERT_PATH
+              value: /etc/infernal-inquisitor-simple/ca/ca.crt
           livenessProbe:
             httpGet:
               path: /health/live
@@ -77,6 +95,9 @@ spec:
           volumeMounts:
             - name: kubernetes-reviewer
               mountPath: /var/run/secrets/infernal-law-kubernetes
+              readOnly: true
+            - name: evaluator-ca-cert
+              mountPath: /etc/infernal-inquisitor-simple/ca
               readOnly: true
         # Terminates TLS in front of the kernel's own plain-HTTP listener.
         # infernal-client-rs's outbound SignedRequest always dials
@@ -139,6 +160,14 @@ spec:
         - name: tls-proxy-config
           configMap:
             name: infernal-law-tls-proxy
+        # Not committed: create with, for example,
+        #   kubectl create configmap evaluator-ca-cert \
+        #     --from-file=ca.crt=infernal-inquisitor-simple-tls.crt
+        # using the same self-signed certificate
+        # infernal-inquisitor-simple's own tls-proxy sidecar serves.
+        - name: evaluator-ca-cert
+          configMap:
+            name: evaluator-ca-cert
         # Not committed: create with, for example,
         #   kubectl create secret tls infernal-law-tls \
         #     --cert=tls.crt --key=tls.key
