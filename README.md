@@ -41,6 +41,11 @@ It listens on `0.0.0.0:8080` by default and provides:
   these routes fail closed with `503` rather than an implicit allow. See
   [`NO_ARTIFACT_SCHEMA_VERSION`](src/kernel/authority.rs) for why a real
   deployment cannot yet produce an `allow` here.
+- `POST /v1/authority/schemas` — publishes an ILK-002 schema version
+  (`{"kind": "artifact"|"permission_policy", "name": "...", "content_digest":
+  "<base64url>"}`) owned by the caller's own verified identity. Publishing
+  never activates a schema or grants its publisher permission; a different
+  service already owning `name` under that `kind` is rejected as `409`.
 
 Set `BIND_ADDRESS` or `PORT` to change the listener configuration. Startup
 fails if `DATABASE_URL` or `INFERNAL_LAW_SERVICE_ID` is absent, the service ID

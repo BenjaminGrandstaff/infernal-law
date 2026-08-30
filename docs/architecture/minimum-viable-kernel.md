@@ -403,17 +403,25 @@ Implementation status:
   `NO_ARTIFACT_SCHEMA_VERSION`/`NO_ARTIFACT_PERMISSION_POLICY_SCHEMA_VERSION`
   pair (`src/kernel/authority.rs`) rather than a fabricated one-off schema
   version.
-- Pending, and blocking any real (non-`503`) decision from the above in
-  production: an HTTP route to actually call `SchemaService::publish` (it is
-  reachable from Rust/tests only today), and a way to link an enrolled
-  instance's signing `service_id` to an `identities` row — `authority_grants`,
-  `authority_schema_versions`, and `authority_decisions` all foreign-key
-  every actor column to `identities`, but nothing today creates that row for
-  an enrolled instance. Until both close, every `authorize` call against a
-  real Postgres backend fails on that same foreign key, correctly, rather
-  than an implicit allow. Also pending: schema registration/activation for
-  whatever schema versions real artifact-bearing grants end up referencing
-  (ADR-0013).
+- Complete: `POST /v1/authority/schemas` exposes `SchemaService::publish`
+  over the governed HTTP boundary (`src/http/schema_dto.rs`) — any
+  authenticated caller may publish a schema version under its own verified
+  identity for a name it owns; a different service already owning that
+  `(kind, name)` is rejected as a sanitized `409`. Publishing alone never
+  activates a schema or grants its publisher permission (ILK-002's own
+  wording), so this route requires no ILK-002 authority decision, only
+  authentication.
+- Pending, and still blocking any real (non-`503`) authority decision in
+  production even with the route above: a way to link an enrolled
+  instance's signing `service_id` to an `identities` row —
+  `authority_grants`, `authority_schema_versions`, and `authority_decisions`
+  all foreign-key every actor column to `identities`, but nothing today
+  creates that row for an enrolled instance. Until this closes, every
+  `authorize` call and every schema publish against a real Postgres backend
+  fails on that same foreign key, correctly, rather than an implicit allow.
+  Also pending: administrator-driven schema activation (`set_authority_schema_status`
+  is Postgres-only, not yet exposed administratively) for whatever schema
+  versions real artifact-bearing grants end up referencing (ADR-0013).
 - The existing signature, replay, and communication-admission gate is the
   required precondition and MUST remain ahead of this authority step.
 

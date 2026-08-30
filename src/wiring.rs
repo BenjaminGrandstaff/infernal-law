@@ -19,7 +19,7 @@ use crate::infrastructure::postgres_request_repository::PostgresRequestRepositor
 use crate::infrastructure::postgres_subscribed_instance_discovery::PostgresSubscribedInstanceDiscovery;
 use crate::infrastructure::postgres_subscription_repository::PostgresSubscriptionRepository;
 use crate::kernel::admission::AdmissionService;
-use crate::kernel::authority::{AuthorityError, AuthorityService};
+use crate::kernel::authority::{AuthorityError, AuthorityService, SchemaService};
 use crate::kernel::enrollment::{EnrollmentService, WorkloadTokenReviewer};
 use crate::kernel::handshakes::{HandshakeReconciler, HandshakeTransport};
 use crate::kernel::identity::{ActorId, IdentityService};
@@ -41,6 +41,7 @@ pub struct Application {
     instance_credential: Arc<InstanceCredential>,
     instance_registry: InstanceRegistryService<PostgresInstanceRegistry>,
     subscriptions: SubscriptionService<PostgresSubscriptionRepository>,
+    schemas: SchemaService<PostgresAuthorityRepository>,
     replay_protection: ReplayProtectionService<PostgresReplayProtectionRepository>,
     requests: RequestService<PostgresRequestRepository>,
 }
@@ -65,6 +66,7 @@ impl Application {
         );
         let subscriptions =
             SubscriptionService::new(PostgresSubscriptionRepository::new(database.clone()));
+        let schemas = SchemaService::new(PostgresAuthorityRepository::new(database.clone()));
         let replay_protection =
             ReplayProtectionService::new(PostgresReplayProtectionRepository::new(database.clone()));
         let requests = RequestService::new(PostgresRequestRepository::new(database.clone()));
@@ -76,6 +78,7 @@ impl Application {
             instance_credential,
             instance_registry,
             subscriptions,
+            schemas,
             replay_protection,
             requests,
         })
@@ -127,6 +130,10 @@ impl Application {
 
     pub const fn subscriptions(&self) -> &SubscriptionService<PostgresSubscriptionRepository> {
         &self.subscriptions
+    }
+
+    pub const fn schemas(&self) -> &SchemaService<PostgresAuthorityRepository> {
+        &self.schemas
     }
 
     /// Builds an ILK-002 authority service against a configured external

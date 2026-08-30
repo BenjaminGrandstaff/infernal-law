@@ -15,7 +15,8 @@ use crate::infrastructure::kubernetes_token_reviewer::KubernetesTokenReviewer;
 use crate::infrastructure::postgres_authority_repository::PostgresAuthorityRepository;
 use crate::kernel::authority::{
     AuthorityDecision, AuthorityDecisionRecorder, AuthorityError, AuthorityRepository,
-    AuthorityService, PolicyEvaluator, PolicyFacts, Scope, no_artifact_schema_versions,
+    AuthorityService, PolicyEvaluator, PolicyFacts, SchemaRepository, SchemaService, Scope,
+    no_artifact_schema_versions,
 };
 use crate::kernel::enrollment::{
     EnrollmentBindingRepository, EnrollmentError, EnrollmentRequest, EnrollmentService,
@@ -40,11 +41,13 @@ use crate::wiring::Application;
 use self::enrollment_dto::{
     EnrollmentErrorResponse, EnrollmentSubmissionRequest, EnrollmentSuccessResponse,
 };
+use self::schema_dto::{PublishSchemaRequest, SchemaVersionResponse};
 use self::subscription_dto::{
     CreateSubscriptionRequest, SubscriptionListResponse, SubscriptionResponse,
 };
 
 pub mod enrollment_dto;
+pub mod schema_dto;
 pub mod subscription_dto;
 
 const DEFAULT_ADDRESS: &str = "0.0.0.0";
@@ -277,6 +280,10 @@ fn dispatch(request: ParsedRequest, application: &Application) -> Response {
             Err(response) => return response,
         };
         let service_id = admitted.verified().service_id();
+        let path = request.path.split('?').next().unwrap_or(&request.path);
+        if path == "/v1/authority/schemas" {
+            return publish_schema(&request, service_id, application.schemas());
+        }
         let authority = match policy_evaluator_from_env(application) {
             Ok(authority) => authority,
             Err(response) => return response,
@@ -384,7 +391,7 @@ impl GovernedErrorResponse {
     const fn internal_error() -> Self {
         Self {
             code: "internal_error",
-            message: "subscription request could not be completed",
+            message: "request could not be completed",
         }
     }
 
@@ -392,6 +399,20 @@ impl GovernedErrorResponse {
         Self {
             code: "subscription_not_authorized",
             message: "subscription action is not authorized",
+        }
+    }
+
+    const fn invalid_schema_request() -> Self {
+        Self {
+            code: "invalid_schema_request",
+            message: "schema request is invalid",
+        }
+    }
+
+    const fn schema_namespace_conflict() -> Self {
+        Self {
+            code: "schema_namespace_conflict",
+            message: "schema name is owned by a different service",
         }
     }
 }
@@ -431,13 +452,16 @@ fn gate_error_response(error: ServiceRequestGateError) -> Response {
 
 fn is_governed_route(path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
-    path == "/v1/subscriptions" || path.starts_with("/v1/subscriptions/")
+    path == "/v1/subscriptions"
+        || path.starts_with("/v1/subscriptions/")
+        || path == "/v1/authority/schemas"
 }
 
 fn is_supported_governed_method(method: &str, path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
     (path == "/v1/subscriptions" && matches!(method, "GET" | "POST"))
         || (path.starts_with("/v1/subscriptions/") && method == "DELETE")
+        || (path == "/v1/authority/schemas" && method == "POST")
 }
 
 /// Builds the configured `HttpPolicyEvaluator`-backed authority service, or
@@ -630,6 +654,86 @@ fn subscription_error_response(error: &SubscriptionError) -> Response {
         }
         SubscriptionError::UnknownService(_) => authentication_rejected(),
         SubscriptionError::AlreadyExists(_) | SubscriptionError::Repository(_) => json_response(
+            "503 Service Unavailable",
+            &GovernedErrorResponse::internal_error(),
+        ),
+    }
+}
+
+/// Publishes a schema version for the caller's own verified identity
+/// (`VerifiedServiceRequest::service_id`), never a request-body field, so a
+/// caller can only ever publish under its own ownership -- the repository
+/// still enforces that a name already owned by a different service is
+/// rejected (`AuthorityError::SchemaNamespaceConflict`). Publication alone
+/// never activates a schema or grants its publisher permission (ILK-002).
+fn publish_schema<R: SchemaRepository>(
+    request: &ParsedRequest,
+    service_id: ActorId,
+    schemas: &SchemaService<R>,
+) -> Response {
+    if !request
+        .content_type
+        .as_deref()
+        .is_some_and(is_json_content_type)
+    {
+        return json_response(
+            "415 Unsupported Media Type",
+            &GovernedErrorResponse::invalid_schema_request(),
+        );
+    }
+    let dto: PublishSchemaRequest = match serde_json::from_slice(&request.body) {
+        Ok(dto) => dto,
+        Err(_) => {
+            return json_response(
+                "400 Bad Request",
+                &GovernedErrorResponse::invalid_schema_request(),
+            );
+        }
+    };
+    let kind = match dto.kind() {
+        Ok(kind) => kind,
+        Err(_) => {
+            return json_response(
+                "400 Bad Request",
+                &GovernedErrorResponse::invalid_schema_request(),
+            );
+        }
+    };
+    let name = match dto.name() {
+        Ok(name) => name,
+        Err(_) => {
+            return json_response(
+                "400 Bad Request",
+                &GovernedErrorResponse::invalid_schema_request(),
+            );
+        }
+    };
+    let content_digest = match dto.content_digest() {
+        Ok(digest) => digest,
+        Err(_) => {
+            return json_response(
+                "400 Bad Request",
+                &GovernedErrorResponse::invalid_schema_request(),
+            );
+        }
+    };
+    match schemas.publish(kind, name, service_id, content_digest, unix_time()) {
+        Ok(record) => json_response("201 Created", &SchemaVersionResponse::from(&record)),
+        Err(error) => schema_error_response(&error),
+    }
+}
+
+fn schema_error_response(error: &AuthorityError) -> Response {
+    match error {
+        AuthorityError::InvalidSchemaName | AuthorityError::InvalidSchemaVersion => json_response(
+            "400 Bad Request",
+            &GovernedErrorResponse::invalid_schema_request(),
+        ),
+        AuthorityError::SchemaNamespaceConflict(_) => json_response(
+            "409 Conflict",
+            &GovernedErrorResponse::schema_namespace_conflict(),
+        ),
+        _ => json_response(
             "503 Service Unavailable",
             &GovernedErrorResponse::internal_error(),
         ),
@@ -1547,6 +1651,172 @@ mod tests {
             );
 
             assert!(subscriptions.list_active(owner).unwrap()[0].is_active());
+        }
+    }
+
+    mod schema_routes {
+        use std::sync::{Arc, Mutex};
+
+        use super::super::*;
+        use crate::kernel::authority::{SchemaName, SchemaRecord, SchemaVersion, SchemaVersionId};
+
+        #[derive(Clone, Default)]
+        struct MemorySchemas(Arc<Mutex<Vec<SchemaRecord>>>);
+
+        impl SchemaRepository for MemorySchemas {
+            fn publish(
+                &self,
+                kind: crate::kernel::authority::SchemaKind,
+                name: SchemaName,
+                owner: ActorId,
+                content_digest: crate::kernel::authority::ContentDigest,
+                published_at: i64,
+            ) -> Result<SchemaRecord, AuthorityError> {
+                let mut records = self.0.lock().unwrap();
+                let latest = records
+                    .iter()
+                    .filter(|record| {
+                        record.version().kind() == kind && record.version().name() == &name
+                    })
+                    .max_by_key(|record| record.version().version());
+                if let Some(latest) = latest {
+                    if latest.version().owner() != owner {
+                        return Err(AuthorityError::SchemaNamespaceConflict(name));
+                    }
+                }
+                let next_version = latest.map_or(1, |record| record.version().version() + 1);
+                let predecessor = latest.map(|record| record.version().id());
+                let version = SchemaVersion::restore(
+                    SchemaVersionId::new(),
+                    kind,
+                    name,
+                    next_version,
+                    owner,
+                    content_digest,
+                    predecessor,
+                    published_at,
+                )?;
+                let record = SchemaRecord::restore(
+                    version,
+                    crate::kernel::authority::SchemaStatus::Published,
+                );
+                records.push(record.clone());
+                Ok(record)
+            }
+
+            fn find(
+                &self,
+                kind: crate::kernel::authority::SchemaKind,
+                name: &SchemaName,
+                version: i64,
+            ) -> Result<Option<SchemaRecord>, AuthorityError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|record| {
+                        record.version().kind() == kind
+                            && record.version().name() == name
+                            && record.version().version() == version
+                    })
+                    .cloned())
+            }
+        }
+
+        fn parsed_request(body: &[u8]) -> ParsedRequest {
+            ParsedRequest {
+                method: "POST".to_owned(),
+                path: "/v1/authority/schemas".to_owned(),
+                authority: Some("kernel.example.test".to_owned()),
+                content_type: Some("application/json".to_owned()),
+                content_digest: None,
+                service_id: None,
+                instance_id: None,
+                request_id: None,
+                signature_input: None,
+                signature: None,
+                body: body.to_vec(),
+            }
+        }
+
+        #[test]
+        fn publish_returns_201_with_the_published_record() {
+            let schemas = SchemaService::new(MemorySchemas::default());
+            let owner = ActorId::new();
+            let digest = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1_u8; 32]);
+            let request = parsed_request(
+                format!(
+                    r#"{{"kind":"artifact","name":"billing.invoice","content_digest":"{digest}"}}"#
+                )
+                .as_bytes(),
+            );
+
+            let response = publish_schema(&request, owner, &schemas);
+
+            assert_eq!(response.status, "201 Created");
+            assert!(response.body.contains("billing.invoice"));
+            assert!(response.body.contains(&owner.to_string()));
+            assert!(response.body.contains("\"version\":1"));
+        }
+
+        #[test]
+        fn publish_rejects_a_non_json_content_type() {
+            let schemas = SchemaService::new(MemorySchemas::default());
+            let mut request = parsed_request(b"{}");
+            request.content_type = Some("text/plain".to_owned());
+
+            let response = publish_schema(&request, ActorId::new(), &schemas);
+
+            assert_eq!(response.status, "415 Unsupported Media Type");
+        }
+
+        #[test]
+        fn publish_rejects_an_invalid_content_digest() {
+            let schemas = SchemaService::new(MemorySchemas::default());
+            let request = parsed_request(
+                br#"{"kind":"artifact","name":"billing.invoice","content_digest":"AA"}"#,
+            );
+
+            let response = publish_schema(&request, ActorId::new(), &schemas);
+
+            assert_eq!(response.status, "400 Bad Request");
+        }
+
+        #[test]
+        fn publish_second_version_uses_the_callers_ownership() {
+            let schemas = SchemaService::new(MemorySchemas::default());
+            let owner = ActorId::new();
+            let digest = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([2_u8; 32]);
+            let request = parsed_request(
+                format!(
+                    r#"{{"kind":"artifact","name":"billing.invoice","content_digest":"{digest}"}}"#
+                )
+                .as_bytes(),
+            );
+            publish_schema(&request, owner, &schemas);
+
+            let response = publish_schema(&request, owner, &schemas);
+
+            assert_eq!(response.status, "201 Created");
+            assert!(response.body.contains("\"version\":2"));
+        }
+
+        #[test]
+        fn publish_rejects_a_different_owner_for_an_existing_name() {
+            let schemas = SchemaService::new(MemorySchemas::default());
+            let digest = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([3_u8; 32]);
+            let request = parsed_request(
+                format!(
+                    r#"{{"kind":"artifact","name":"billing.invoice","content_digest":"{digest}"}}"#
+                )
+                .as_bytes(),
+            );
+            publish_schema(&request, ActorId::new(), &schemas);
+
+            let response = publish_schema(&request, ActorId::new(), &schemas);
+
+            assert_eq!(response.status, "409 Conflict");
         }
     }
 }

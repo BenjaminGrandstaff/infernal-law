@@ -14,6 +14,7 @@ src/
 │                            # colocated unit tests
 ├── http/
 │   ├── enrollment_dto.rs   # strict initial-enrollment JSON profile
+│   ├── schema_dto.rs       # ILK-002 schema-publication JSON wire format
 │   └── subscription_dto.rs # ILK-010 subscription JSON wire format
 ├── infrastructure/
 │   ├── mod.rs              # external-system adapter boundary

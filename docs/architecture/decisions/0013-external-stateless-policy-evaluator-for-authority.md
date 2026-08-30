@@ -191,9 +191,12 @@ subscription create/disable handlers call it — the first real caller of
 this machinery. Since subscription management has no artifact content,
 these calls use a reserved schema-version pair
 (`NO_ARTIFACT_SCHEMA_VERSION`/`NO_ARTIFACT_PERMISSION_POLICY_SCHEMA_VERSION`
-in `src/kernel/authority.rs`) rather than a fabricated one-off ID. Two gaps
-still keep this fail-closed rather than functional against a real Postgres
-backend: nothing exposes `SchemaService::publish` over HTTP yet, and nothing
-links an enrolled instance's signing `service_id` to an `identities` row,
-which `authority_grants`/`authority_schema_versions`/`authority_decisions`
-all foreign-key every actor column to.
+in `src/kernel/authority.rs`) rather than a fabricated one-off ID.
+`POST /v1/authority/schemas` now exposes `SchemaService::publish` over HTTP
+(any authenticated caller may publish for names it owns), closing one gap
+that kept this fail-closed. One gap remains: nothing links an enrolled
+instance's signing `service_id` to an `identities` row, which
+`authority_grants`/`authority_schema_versions`/`authority_decisions` all
+foreign-key every actor column to — so a real Postgres backend still
+rejects the grant lookup and decision recording `authorize` needs, correctly
+failing closed rather than an implicit allow.
