@@ -63,6 +63,25 @@ It listens on `0.0.0.0:8080` by default and provides:
   for a subscription created afterward are not built yet); a materialization
   failure never fails the submission response, since the request is already
   durably accepted.
+- `POST /v1/routes/{route_id}/claims` — ILK-011 work-claim creation
+  (`{"lease_seconds": <i64>}`). The worker's identity is always the caller's
+  own verified service and instance, never a body field. Fails `404` if the
+  route does not exist or is not assigned to the caller's service
+  (deliberately indistinguishable, matching the ILK-010 disable route's own
+  ownership-hiding convention), and `409` if a current, unexpired claim
+  already exists. A successful claim atomically supersedes any prior
+  claim on the route and increases its fencing token by exactly one. No
+  separate ILK-002 authority decision gates this route — the route's own
+  destination already encodes entitlement.
+- `POST /v1/claims/{id}/renew`
+  (`{"fencing_token": <i64>, "lease_seconds": <i64>}`), `POST
+  /v1/claims/{id}/release` and `POST /v1/claims/{id}/complete`
+  (`{"fencing_token": <i64>}`) — act on an existing claim by ID. Renewal
+  extends the lease without changing the fencing token; release and
+  completion are terminal. All three require the caller to present the
+  claim's current fencing token and fail `409` (a fenced conflict) for a
+  stale holder — including a token that was current but has since been
+  superseded by a new claim — or `404` if the claim does not exist.
 
 Set `BIND_ADDRESS` or `PORT` to change the listener configuration. Startup
 fails if `DATABASE_URL` or `INFERNAL_LAW_SERVICE_ID` is absent, the service ID

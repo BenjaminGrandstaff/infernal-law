@@ -23,14 +23,14 @@ use crate::kernel::enrollment::{
     WorkloadTokenReviewer,
 };
 use crate::kernel::identity::ActorId;
-use crate::kernel::instance_keys::InstancePublicKey;
+use crate::kernel::instance_keys::{InstanceId, InstancePublicKey};
 use crate::kernel::instance_registry::{InstanceRegistryRepository, RegisteredInstance};
 use crate::kernel::request_gate::{
     AdmittedServiceRequest, ServiceRequestGate, ServiceRequestGateError,
 };
 use crate::kernel::requests::{
     ActionName, RequestAcceptance, RequestError, RequestId, RequestRepository, RequestService,
-    Route, RouteRepository, RouteService,
+    Route, RouteId, RouteRepository, RouteService,
 };
 use crate::kernel::service_requests::{
     ServiceRequestAuthenticationError, ServiceRequestParts, SignedServiceRequest,
@@ -39,6 +39,7 @@ use crate::kernel::subscriptions::{
     DeliveryMode, EventType, SubscriptionError, SubscriptionId, SubscriptionRepository,
     SubscriptionService,
 };
+use crate::kernel::work_claims::{ClaimId, WorkClaimError, WorkClaimRepository, WorkClaimService};
 use crate::kernel::{admission::AdmissionError, replay_protection::ReplayProtectionError};
 use crate::wiring::Application;
 
@@ -50,11 +51,13 @@ use self::schema_dto::{PublishSchemaRequest, SchemaVersionResponse};
 use self::subscription_dto::{
     CreateSubscriptionRequest, SubscriptionListResponse, SubscriptionResponse,
 };
+use self::work_claim_dto::{ClaimRequest, FencedActionRequest, RenewRequest, WorkClaimResponse};
 
 pub mod enrollment_dto;
 pub mod request_dto;
 pub mod schema_dto;
 pub mod subscription_dto;
+pub mod work_claim_dto;
 
 const DEFAULT_ADDRESS: &str = "0.0.0.0";
 const DEFAULT_PORT: &str = "8080";
@@ -390,6 +393,29 @@ fn dispatch(request: ParsedRequest, application: &Application) -> Response {
         if path == "/v1/authority/schemas" {
             return publish_schema(&request, service_id, application.schemas());
         }
+        if let Some(route_id) = path
+            .strip_prefix("/v1/routes/")
+            .and_then(|rest| rest.strip_suffix("/claims"))
+        {
+            return claim_route(
+                &request,
+                service_id,
+                verified.instance_id(),
+                route_id,
+                application.work_claims(),
+            );
+        }
+        if let Some(rest) = path.strip_prefix("/v1/claims/") {
+            if let Some(claim_id) = rest.strip_suffix("/renew") {
+                return renew_claim_route(&request, claim_id, application.work_claims());
+            }
+            if let Some(claim_id) = rest.strip_suffix("/release") {
+                return release_claim_route(&request, claim_id, application.work_claims());
+            }
+            if let Some(claim_id) = rest.strip_suffix("/complete") {
+                return complete_claim_route(&request, claim_id, application.work_claims());
+            }
+        }
         let authority = match policy_evaluator_from_env(application) {
             Ok(authority) => authority,
             Err(response) => return response,
@@ -561,6 +587,34 @@ impl GovernedErrorResponse {
             message: "request is not authorized",
         }
     }
+
+    const fn invalid_work_claim_request() -> Self {
+        Self {
+            code: "invalid_work_claim_request",
+            message: "work claim request is invalid",
+        }
+    }
+
+    const fn claim_not_found() -> Self {
+        Self {
+            code: "claim_not_found",
+            message: "claim or route was not found",
+        }
+    }
+
+    const fn route_already_claimed() -> Self {
+        Self {
+            code: "route_already_claimed",
+            message: "route already has an active claim",
+        }
+    }
+
+    const fn claim_fenced() -> Self {
+        Self {
+            code: "claim_fenced",
+            message: "fencing token does not match the current active claim",
+        }
+    }
 }
 
 fn authentication_rejected() -> Response {
@@ -603,6 +657,8 @@ fn is_governed_route(path: &str) -> bool {
         || path == "/v1/authority/schemas"
         || path == "/v1/requests"
         || path.starts_with("/v1/requests/")
+        || (path.starts_with("/v1/routes/") && path.ends_with("/claims"))
+        || is_claim_action_path(path)
 }
 
 fn is_supported_governed_method(method: &str, path: &str) -> bool {
@@ -612,6 +668,13 @@ fn is_supported_governed_method(method: &str, path: &str) -> bool {
         || (path == "/v1/authority/schemas" && method == "POST")
         || (path == "/v1/requests" && method == "POST")
         || (path.starts_with("/v1/requests/") && method == "GET")
+        || (path.starts_with("/v1/routes/") && path.ends_with("/claims") && method == "POST")
+        || (is_claim_action_path(path) && method == "POST")
+}
+
+fn is_claim_action_path(path: &str) -> bool {
+    path.starts_with("/v1/claims/")
+        && (path.ends_with("/renew") || path.ends_with("/release") || path.ends_with("/complete"))
 }
 
 /// Builds the configured `HttpPolicyEvaluator`-backed authority service, or
@@ -1037,6 +1100,203 @@ fn schema_error_response(error: &AuthorityError) -> Response {
             &GovernedErrorResponse::schema_namespace_conflict(),
         ),
         _ => json_response(
+            "503 Service Unavailable",
+            &GovernedErrorResponse::internal_error(),
+        ),
+    }
+}
+
+/// Claims `route_id` for the caller's own verified identity and instance
+/// (`worker_service`/`worker_instance`), never a request-body field --
+/// exactly like every other governed handler, a caller can only ever act
+/// as itself. Ownership is enforced by the repository against the route's
+/// own assigned destination (ILK-010), not by a separate ILK-002 authority
+/// call: a route already encodes "this destination is entitled to this
+/// work" through the subscription that produced it.
+fn claim_route<R: WorkClaimRepository>(
+    request: &ParsedRequest,
+    worker_service: ActorId,
+    worker_instance: InstanceId,
+    route_id: &str,
+    claims: &WorkClaimService<R>,
+) -> Response {
+    let route_id: RouteId = match route_id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return json_response(
+                "400 Bad Request",
+                &GovernedErrorResponse::invalid_work_claim_request(),
+            );
+        }
+    };
+    if !request
+        .content_type
+        .as_deref()
+        .is_some_and(is_json_content_type)
+    {
+        return json_response(
+            "415 Unsupported Media Type",
+            &GovernedErrorResponse::invalid_work_claim_request(),
+        );
+    }
+    let dto: ClaimRequest = match serde_json::from_slice(&request.body) {
+        Ok(dto) => dto,
+        Err(_) => {
+            return json_response(
+                "400 Bad Request",
+                &GovernedErrorResponse::invalid_work_claim_request(),
+            );
+        }
+    };
+    let now = unix_time();
+    let lease_expires_at = match dto.lease_expires_at(now) {
+        Some(value) => value,
+        None => {
+            return json_response(
+                "400 Bad Request",
+                &GovernedErrorResponse::invalid_work_claim_request(),
+            );
+        }
+    };
+    match claims.claim(
+        route_id,
+        worker_service,
+        worker_instance,
+        lease_expires_at,
+        now,
+    ) {
+        Ok(claim) => json_response("201 Created", &WorkClaimResponse::from(&claim)),
+        Err(error) => work_claim_error_response(&error),
+    }
+}
+
+fn renew_claim_route<R: WorkClaimRepository>(
+    request: &ParsedRequest,
+    claim_id: &str,
+    claims: &WorkClaimService<R>,
+) -> Response {
+    let claim_id: ClaimId = match claim_id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return json_response(
+                "400 Bad Request",
+                &GovernedErrorResponse::invalid_work_claim_request(),
+            );
+        }
+    };
+    if !request
+        .content_type
+        .as_deref()
+        .is_some_and(is_json_content_type)
+    {
+        return json_response(
+            "415 Unsupported Media Type",
+            &GovernedErrorResponse::invalid_work_claim_request(),
+        );
+    }
+    let dto: RenewRequest = match serde_json::from_slice(&request.body) {
+        Ok(dto) => dto,
+        Err(_) => {
+            return json_response(
+                "400 Bad Request",
+                &GovernedErrorResponse::invalid_work_claim_request(),
+            );
+        }
+    };
+    let now = unix_time();
+    let lease_expires_at = match dto.lease_expires_at(now) {
+        Some(value) => value,
+        None => {
+            return json_response(
+                "400 Bad Request",
+                &GovernedErrorResponse::invalid_work_claim_request(),
+            );
+        }
+    };
+    match claims.renew(claim_id, dto.fencing_token(), lease_expires_at, now) {
+        Ok(claim) => json_response("200 OK", &WorkClaimResponse::from(&claim)),
+        Err(error) => work_claim_error_response(&error),
+    }
+}
+
+fn release_claim_route<R: WorkClaimRepository>(
+    request: &ParsedRequest,
+    claim_id: &str,
+    claims: &WorkClaimService<R>,
+) -> Response {
+    let (claim_id, dto) = match parse_fenced_action(claim_id, request) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match claims.release(claim_id, dto.fencing_token(), unix_time()) {
+        Ok(claim) => json_response("200 OK", &WorkClaimResponse::from(&claim)),
+        Err(error) => work_claim_error_response(&error),
+    }
+}
+
+fn complete_claim_route<R: WorkClaimRepository>(
+    request: &ParsedRequest,
+    claim_id: &str,
+    claims: &WorkClaimService<R>,
+) -> Response {
+    let (claim_id, dto) = match parse_fenced_action(claim_id, request) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match claims.complete(claim_id, dto.fencing_token(), unix_time()) {
+        Ok(claim) => json_response("200 OK", &WorkClaimResponse::from(&claim)),
+        Err(error) => work_claim_error_response(&error),
+    }
+}
+
+fn parse_fenced_action(
+    claim_id: &str,
+    request: &ParsedRequest,
+) -> Result<(ClaimId, FencedActionRequest), Response> {
+    let claim_id: ClaimId = claim_id.parse().map_err(|_| {
+        json_response(
+            "400 Bad Request",
+            &GovernedErrorResponse::invalid_work_claim_request(),
+        )
+    })?;
+    if !request
+        .content_type
+        .as_deref()
+        .is_some_and(is_json_content_type)
+    {
+        return Err(json_response(
+            "415 Unsupported Media Type",
+            &GovernedErrorResponse::invalid_work_claim_request(),
+        ));
+    }
+    let dto: FencedActionRequest = serde_json::from_slice(&request.body).map_err(|_| {
+        json_response(
+            "400 Bad Request",
+            &GovernedErrorResponse::invalid_work_claim_request(),
+        )
+    })?;
+    Ok((claim_id, dto))
+}
+
+fn work_claim_error_response(error: &WorkClaimError) -> Response {
+    match error {
+        WorkClaimError::InvalidClaimId
+        | WorkClaimError::InvalidFencingToken
+        | WorkClaimError::InvalidLease => json_response(
+            "400 Bad Request",
+            &GovernedErrorResponse::invalid_work_claim_request(),
+        ),
+        WorkClaimError::RouteNotFound(_) | WorkClaimError::NotFound(_) => {
+            json_response("404 Not Found", &GovernedErrorResponse::claim_not_found())
+        }
+        WorkClaimError::AlreadyClaimed(_) => json_response(
+            "409 Conflict",
+            &GovernedErrorResponse::route_already_claimed(),
+        ),
+        WorkClaimError::Fenced => {
+            json_response("409 Conflict", &GovernedErrorResponse::claim_fenced())
+        }
+        WorkClaimError::Repository(_) => json_response(
             "503 Service Unavailable",
             &GovernedErrorResponse::internal_error(),
         ),
@@ -2764,6 +3024,433 @@ mod tests {
                 .unwrap();
 
             assert!(materialized.is_empty());
+        }
+    }
+
+    mod work_claim_routes {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        use super::super::*;
+        use crate::kernel::work_claims::{WorkClaim, WorkClaimStatus};
+
+        #[derive(Clone, Default)]
+        struct MemoryWorkClaims {
+            route_destinations: Arc<Mutex<HashMap<RouteId, ActorId>>>,
+            claims: Arc<Mutex<Vec<WorkClaim>>>,
+        }
+
+        impl MemoryWorkClaims {
+            fn with_route(route_id: RouteId, destination: ActorId) -> Self {
+                let repository = Self::default();
+                repository
+                    .route_destinations
+                    .lock()
+                    .unwrap()
+                    .insert(route_id, destination);
+                repository
+            }
+        }
+
+        impl WorkClaimRepository for MemoryWorkClaims {
+            fn claim(
+                &self,
+                route_id: RouteId,
+                worker_service: ActorId,
+                worker_instance: InstanceId,
+                lease_expires_at: i64,
+                now: i64,
+            ) -> Result<WorkClaim, WorkClaimError> {
+                let destinations = self.route_destinations.lock().unwrap();
+                if destinations.get(&route_id) != Some(&worker_service) {
+                    return Err(WorkClaimError::RouteNotFound(route_id));
+                }
+                let mut claims = self.claims.lock().unwrap();
+                let latest = claims
+                    .iter_mut()
+                    .filter(|claim| claim.route_id() == route_id)
+                    .max_by_key(|claim| claim.fencing_token());
+                let next_fencing_token = match latest {
+                    Some(claim) if claim.is_current(now) => {
+                        return Err(WorkClaimError::AlreadyClaimed(route_id));
+                    }
+                    Some(claim) => claim.fencing_token() + 1,
+                    None => 1,
+                };
+                let claim = WorkClaim::restore(
+                    ClaimId::new(),
+                    route_id,
+                    worker_service,
+                    worker_instance,
+                    next_fencing_token,
+                    WorkClaimStatus::Active,
+                    now,
+                    lease_expires_at,
+                )
+                .unwrap();
+                claims.push(claim.clone());
+                Ok(claim)
+            }
+
+            fn renew(
+                &self,
+                claim_id: ClaimId,
+                fencing_token: i64,
+                lease_expires_at: i64,
+                now: i64,
+            ) -> Result<WorkClaim, WorkClaimError> {
+                let mut claims = self.claims.lock().unwrap();
+                let claim = Self::current(&mut claims, claim_id, fencing_token, now)?;
+                *claim = WorkClaim::restore(
+                    claim.id(),
+                    claim.route_id(),
+                    claim.worker_service(),
+                    claim.worker_instance(),
+                    claim.fencing_token(),
+                    WorkClaimStatus::Active,
+                    claim.claimed_at(),
+                    lease_expires_at,
+                )
+                .unwrap();
+                Ok(claim.clone())
+            }
+
+            fn release(
+                &self,
+                claim_id: ClaimId,
+                fencing_token: i64,
+                now: i64,
+            ) -> Result<WorkClaim, WorkClaimError> {
+                self.transition(claim_id, fencing_token, now, WorkClaimStatus::Released)
+            }
+
+            fn complete(
+                &self,
+                claim_id: ClaimId,
+                fencing_token: i64,
+                now: i64,
+            ) -> Result<WorkClaim, WorkClaimError> {
+                self.transition(claim_id, fencing_token, now, WorkClaimStatus::Completed)
+            }
+
+            fn find(&self, claim_id: ClaimId) -> Result<Option<WorkClaim>, WorkClaimError> {
+                Ok(self
+                    .claims
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|claim| claim.id() == claim_id)
+                    .cloned())
+            }
+        }
+
+        impl MemoryWorkClaims {
+            fn current(
+                claims: &mut [WorkClaim],
+                claim_id: ClaimId,
+                fencing_token: i64,
+                now: i64,
+            ) -> Result<&mut WorkClaim, WorkClaimError> {
+                let claim = claims
+                    .iter_mut()
+                    .find(|claim| claim.id() == claim_id)
+                    .ok_or(WorkClaimError::NotFound(claim_id))?;
+                if claim.fencing_token() != fencing_token || !claim.is_current(now) {
+                    return Err(WorkClaimError::Fenced);
+                }
+                Ok(claim)
+            }
+
+            fn transition(
+                &self,
+                claim_id: ClaimId,
+                fencing_token: i64,
+                now: i64,
+                status: WorkClaimStatus,
+            ) -> Result<WorkClaim, WorkClaimError> {
+                let mut claims = self.claims.lock().unwrap();
+                let claim = Self::current(&mut claims, claim_id, fencing_token, now)?;
+                *claim = WorkClaim::restore(
+                    claim.id(),
+                    claim.route_id(),
+                    claim.worker_service(),
+                    claim.worker_instance(),
+                    claim.fencing_token(),
+                    status,
+                    claim.claimed_at(),
+                    claim.lease_expires_at(),
+                )
+                .unwrap();
+                Ok(claim.clone())
+            }
+        }
+
+        fn parsed_request(method: &str, path: &str, body: &[u8]) -> ParsedRequest {
+            ParsedRequest {
+                method: method.to_owned(),
+                path: path.to_owned(),
+                authority: Some("kernel.example.test".to_owned()),
+                content_type: Some("application/json".to_owned()),
+                content_digest: None,
+                service_id: None,
+                instance_id: None,
+                request_id: None,
+                signature_input: None,
+                signature: None,
+                body: body.to_vec(),
+            }
+        }
+
+        #[test]
+        fn claim_returns_201_with_the_created_claim() {
+            let destination = ActorId::new();
+            let route_id = RouteId::new();
+            let claims = WorkClaimService::new(MemoryWorkClaims::with_route(route_id, destination));
+            let request = parsed_request(
+                "POST",
+                &format!("/v1/routes/{route_id}/claims"),
+                br#"{"lease_seconds":30}"#,
+            );
+
+            let response = claim_route(
+                &request,
+                destination,
+                InstanceId::new(),
+                &route_id.to_string(),
+                &claims,
+            );
+
+            assert_eq!(response.status, "201 Created");
+            assert!(response.body.contains("\"fencing_token\":1"));
+            assert!(response.body.contains("\"status\":\"active\""));
+        }
+
+        #[test]
+        fn claim_rejects_a_malformed_route_id() {
+            let claims = WorkClaimService::new(MemoryWorkClaims::default());
+            let request = parsed_request(
+                "POST",
+                "/v1/routes/not-a-uuid/claims",
+                br#"{"lease_seconds":30}"#,
+            );
+
+            let response = claim_route(
+                &request,
+                ActorId::new(),
+                InstanceId::new(),
+                "not-a-uuid",
+                &claims,
+            );
+
+            assert_eq!(response.status, "400 Bad Request");
+        }
+
+        #[test]
+        fn claim_rejects_a_non_positive_lease() {
+            let destination = ActorId::new();
+            let route_id = RouteId::new();
+            let claims = WorkClaimService::new(MemoryWorkClaims::with_route(route_id, destination));
+            let request = parsed_request(
+                "POST",
+                &format!("/v1/routes/{route_id}/claims"),
+                br#"{"lease_seconds":0}"#,
+            );
+
+            let response = claim_route(
+                &request,
+                destination,
+                InstanceId::new(),
+                &route_id.to_string(),
+                &claims,
+            );
+
+            assert_eq!(response.status, "400 Bad Request");
+        }
+
+        #[test]
+        fn claim_conflicts_when_a_current_claim_already_exists() {
+            let destination = ActorId::new();
+            let route_id = RouteId::new();
+            let claims = WorkClaimService::new(MemoryWorkClaims::with_route(route_id, destination));
+            let request = parsed_request(
+                "POST",
+                &format!("/v1/routes/{route_id}/claims"),
+                br#"{"lease_seconds":30}"#,
+            );
+            claim_route(
+                &request,
+                destination,
+                InstanceId::new(),
+                &route_id.to_string(),
+                &claims,
+            );
+
+            let response = claim_route(
+                &request,
+                destination,
+                InstanceId::new(),
+                &route_id.to_string(),
+                &claims,
+            );
+
+            assert_eq!(response.status, "409 Conflict");
+        }
+
+        #[test]
+        fn claim_hides_a_route_owned_by_another_service_as_not_found() {
+            let route_id = RouteId::new();
+            let claims =
+                WorkClaimService::new(MemoryWorkClaims::with_route(route_id, ActorId::new()));
+            let request = parsed_request(
+                "POST",
+                &format!("/v1/routes/{route_id}/claims"),
+                br#"{"lease_seconds":30}"#,
+            );
+
+            let response = claim_route(
+                &request,
+                ActorId::new(),
+                InstanceId::new(),
+                &route_id.to_string(),
+                &claims,
+            );
+
+            assert_eq!(response.status, "404 Not Found");
+        }
+
+        #[test]
+        fn renew_extends_the_lease_without_changing_the_fencing_token() {
+            let destination = ActorId::new();
+            let route_id = RouteId::new();
+            let claims = WorkClaimService::new(MemoryWorkClaims::with_route(route_id, destination));
+            let claimed = claims
+                .claim(
+                    route_id,
+                    destination,
+                    InstanceId::new(),
+                    unix_time() + 30,
+                    unix_time(),
+                )
+                .unwrap();
+            let request = parsed_request(
+                "POST",
+                &format!("/v1/claims/{}/renew", claimed.id()),
+                format!(
+                    r#"{{"fencing_token":{},"lease_seconds":30}}"#,
+                    claimed.fencing_token()
+                )
+                .as_bytes(),
+            );
+
+            let response = renew_claim_route(&request, &claimed.id().to_string(), &claims);
+
+            assert_eq!(response.status, "200 OK");
+            assert!(response.body.contains("\"fencing_token\":1"));
+        }
+
+        #[test]
+        fn renew_is_fenced_when_the_token_is_stale() {
+            let destination = ActorId::new();
+            let route_id = RouteId::new();
+            let claims = WorkClaimService::new(MemoryWorkClaims::with_route(route_id, destination));
+            let claimed = claims
+                .claim(route_id, destination, InstanceId::new(), 30, 0)
+                .unwrap();
+            claims
+                .claim(route_id, destination, InstanceId::new(), 100, 40)
+                .unwrap();
+            let request = parsed_request(
+                "POST",
+                &format!("/v1/claims/{}/renew", claimed.id()),
+                br#"{"fencing_token":1,"lease_seconds":30}"#,
+            );
+
+            let response = renew_claim_route(&request, &claimed.id().to_string(), &claims);
+
+            assert_eq!(response.status, "409 Conflict");
+        }
+
+        #[test]
+        fn release_allows_immediate_reclaim() {
+            let destination = ActorId::new();
+            let route_id = RouteId::new();
+            let claims = WorkClaimService::new(MemoryWorkClaims::with_route(route_id, destination));
+            let claimed = claims
+                .claim(
+                    route_id,
+                    destination,
+                    InstanceId::new(),
+                    unix_time() + 1_000,
+                    unix_time(),
+                )
+                .unwrap();
+            let release_request = parsed_request(
+                "POST",
+                &format!("/v1/claims/{}/release", claimed.id()),
+                br#"{"fencing_token":1}"#,
+            );
+
+            let released =
+                release_claim_route(&release_request, &claimed.id().to_string(), &claims);
+            assert_eq!(released.status, "200 OK");
+            assert!(released.body.contains("\"status\":\"released\""));
+
+            let claim_request = parsed_request(
+                "POST",
+                &format!("/v1/routes/{route_id}/claims"),
+                br#"{"lease_seconds":30}"#,
+            );
+            let reclaimed = claim_route(
+                &claim_request,
+                destination,
+                InstanceId::new(),
+                &route_id.to_string(),
+                &claims,
+            );
+            assert_eq!(reclaimed.status, "201 Created");
+        }
+
+        #[test]
+        fn complete_is_terminal() {
+            let destination = ActorId::new();
+            let route_id = RouteId::new();
+            let claims = WorkClaimService::new(MemoryWorkClaims::with_route(route_id, destination));
+            let claimed = claims
+                .claim(
+                    route_id,
+                    destination,
+                    InstanceId::new(),
+                    unix_time() + 1_000,
+                    unix_time(),
+                )
+                .unwrap();
+            let complete_request = parsed_request(
+                "POST",
+                &format!("/v1/claims/{}/complete", claimed.id()),
+                br#"{"fencing_token":1}"#,
+            );
+
+            let response =
+                complete_claim_route(&complete_request, &claimed.id().to_string(), &claims);
+            assert_eq!(response.status, "200 OK");
+            assert!(response.body.contains("\"status\":\"completed\""));
+
+            let second_complete =
+                complete_claim_route(&complete_request, &claimed.id().to_string(), &claims);
+            assert_eq!(second_complete.status, "409 Conflict");
+        }
+
+        #[test]
+        fn actions_reject_a_non_json_content_type() {
+            let claims = WorkClaimService::new(MemoryWorkClaims::default());
+            let claim_id = ClaimId::new().to_string();
+            let mut request =
+                parsed_request("POST", &format!("/v1/claims/{claim_id}/release"), b"{}");
+            request.content_type = Some("text/plain".to_owned());
+
+            let response = release_claim_route(&request, &claim_id, &claims);
+
+            assert_eq!(response.status, "415 Unsupported Media Type");
         }
     }
 }

@@ -19,6 +19,7 @@ use crate::infrastructure::postgres_request_repository::PostgresRequestRepositor
 use crate::infrastructure::postgres_route_repository::PostgresRouteRepository;
 use crate::infrastructure::postgres_subscribed_instance_discovery::PostgresSubscribedInstanceDiscovery;
 use crate::infrastructure::postgres_subscription_repository::PostgresSubscriptionRepository;
+use crate::infrastructure::postgres_work_claim_repository::PostgresWorkClaimRepository;
 use crate::kernel::admission::AdmissionService;
 use crate::kernel::authority::{AuthorityError, AuthorityService, SchemaService};
 use crate::kernel::enrollment::{EnrollmentService, WorkloadTokenReviewer};
@@ -31,6 +32,7 @@ use crate::kernel::request_gate::ServiceRequestGate;
 use crate::kernel::requests::{RequestService, RouteService};
 use crate::kernel::service_requests::ServiceRequestVerifier;
 use crate::kernel::subscriptions::SubscriptionService;
+use crate::kernel::work_claims::WorkClaimService;
 
 pub const SERVICE_ID_ENV: &str = "INFERNAL_LAW_SERVICE_ID";
 
@@ -46,6 +48,7 @@ pub struct Application {
     replay_protection: ReplayProtectionService<PostgresReplayProtectionRepository>,
     requests: RequestService<PostgresRequestRepository>,
     routes: RouteService<PostgresRouteRepository>,
+    work_claims: WorkClaimService<PostgresWorkClaimRepository>,
 }
 
 impl Application {
@@ -73,6 +76,7 @@ impl Application {
             ReplayProtectionService::new(PostgresReplayProtectionRepository::new(database.clone()));
         let requests = RequestService::new(PostgresRequestRepository::new(database.clone()));
         let routes = RouteService::new(PostgresRouteRepository::new(database.clone()));
+        let work_claims = WorkClaimService::new(PostgresWorkClaimRepository::new(database.clone()));
 
         Ok(Self {
             database,
@@ -85,6 +89,7 @@ impl Application {
             replay_protection,
             requests,
             routes,
+            work_claims,
         })
     }
 
@@ -180,6 +185,10 @@ impl Application {
 
     pub const fn routes(&self) -> &RouteService<PostgresRouteRepository> {
         &self.routes
+    }
+
+    pub const fn work_claims(&self) -> &WorkClaimService<PostgresWorkClaimRepository> {
+        &self.work_claims
     }
 
     pub fn handshake_reconciler<T>(

@@ -1,7 +1,7 @@
 # Minimum viable kernel
 
 > Status: Requirements draft  
-> Last reviewed: 2026-08-29
+> Last reviewed: 2026-08-30
 > Owners: TODO
 
 ## Objective
@@ -844,6 +844,40 @@ Acceptance criteria:
 - Concurrent failover and completion produce one winner: either the current
   holder completes, or reassignment advances the fence and makes that holder
   stale.
+
+Implementation status:
+
+- Complete: `WorkClaim`, `WorkClaimRepository`, and `WorkClaimService`
+  (`src/kernel/work_claims.rs`) -- atomic `claim`/`renew`/`release`/`complete`
+  bound to a route, the caller's own verified worker service and instance,
+  a lease window, and a fencing token that increases by exactly one each
+  time a route is claimed. `claim` fails as `RouteNotFound` if the route
+  does not exist or is not assigned to the caller (indistinguishable to the
+  caller, matching how disabling another service's subscription looks
+  identical to disabling one that does not exist), and as `AlreadyClaimed`
+  if a current, unexpired claim exists; otherwise it supersedes whatever
+  claim previously existed. `renew`/`release`/`complete` fail as `Fenced`
+  for a stale holder -- including one that presents a fencing token that
+  was current but has since been superseded -- exactly like a stale holder
+  losing a lease. PostgreSQL enforces the append-only, terminal-once status
+  transition structurally (`protect_work_claim()` in migration 0017): a
+  claim's identity fields are immutable, its lease may only be extended
+  while still `active`, and once terminal (`completed`/`released`/`expired`)
+  its status can never revert.
+- Complete: governed HTTP routes -- `POST /v1/routes/{route_id}/claims`,
+  `POST /v1/claims/{id}/renew`, `POST /v1/claims/{id}/release`, and
+  `POST /v1/claims/{id}/complete`. No separate ILK-002 authority decision
+  gates these, matching `POST /v1/authority/schemas`'s precedent: a route
+  already encodes "this destination is entitled to this work" through the
+  subscription that produced it, so the repository-level ownership check is
+  the only authorization these need.
+- Concurrency proven directly: sixteen threads racing to claim the same
+  route produce exactly one success and fifteen `AlreadyClaimed` results
+  (`tests/work_claim_contract.rs`), independent of PostgreSQL.
+- Pending: any scheduling policy (which eligible route a worker should
+  claim next, priority, capacity) -- deliberately out of kernel scope
+  (ADR-0011) -- and wiring a reference worker (`infernal-taskmaster-simple`,
+  still an unimplemented stub) to actually call these routes.
 
 ### ILK-012: Idempotency
 

@@ -1,7 +1,7 @@
 # Rust source layout
 
 > Status: Active  
-> Last reviewed: 2026-08-29
+> Last reviewed: 2026-08-30
 
 The crate separates the executable process from independently testable
 library modules:
@@ -16,7 +16,8 @@ src/
 │   ├── enrollment_dto.rs   # strict initial-enrollment JSON profile
 │   ├── request_dto.rs      # ILK-003 request-submission JSON wire format
 │   ├── schema_dto.rs       # ILK-002 schema-publication JSON wire format
-│   └── subscription_dto.rs # ILK-010 subscription JSON wire format
+│   ├── subscription_dto.rs # ILK-010 subscription JSON wire format
+│   └── work_claim_dto.rs   # ILK-011 work-claim JSON wire format
 ├── infrastructure/
 │   ├── mod.rs              # external-system adapter boundary
 │   ├── database.rs         # pooled PostgreSQL and pgvector wiring
@@ -44,8 +45,10 @@ src/
 │   │                        # challenge consumption and handshake history
 │   ├── postgres_subscribed_instance_discovery.rs
 │   │                        # active-subscription/eligible-instance read model
-│   └── postgres_subscription_repository.rs
-│                            # ILK-010 persistence and append-only audit
+│   ├── postgres_subscription_repository.rs
+│   │                        # ILK-010 persistence and append-only audit
+│   └── postgres_work_claim_repository.rs
+│                            # atomic, fenced, append-only ILK-011 persistence
 ├── wiring.rs               # process dependency construction
 └── kernel/
     ├── mod.rs              # capability registry and registry tests
@@ -93,6 +96,8 @@ tests/
 │                            # independently runnable POST handler contract
 ├── subscription_contract.rs
 │                            # independently runnable ILK-010 contract
+├── work_claim_contract.rs
+│                            # independently runnable ILK-011 contract
 ├── handshake_reconciler_contract.rs
 │                            # isolated signed/failure-isolation contract
 ├── service_request_signature_contract.rs
@@ -130,8 +135,10 @@ tests/
 │                            # opt-in ILK-002 grant administration/read test
 ├── postgres_governed_http_middleware.rs
 │                            # opt-in full governed HTTP gate composition
-└── postgres_instance_registry.rs
-                             # opt-in public-key/lease durability test
+├── postgres_instance_registry.rs
+│                            # opt-in public-key/lease durability test
+└── postgres_work_claim_repository.rs
+                             # opt-in ILK-011 atomic/fenced/append-only test
 ```
 
 Each capability owns its implementation and private unit tests. Cross-module
@@ -161,6 +168,7 @@ cargo test --test enrollment_contract
 cargo test --test enrollment_json_contract
 cargo test --test enrollment_http_contract
 cargo test --test subscription_contract
+cargo test --test work_claim_contract
 cargo test --test handshake_reconciler_contract
 cargo test --test service_request_signature_contract
 cargo test --test replay_protection_contract
@@ -188,6 +196,7 @@ cargo test --test postgres_route_repository -- --ignored
 cargo test --test postgres_communication_admission -- --ignored
 cargo test --test postgres_authority_repository -- --ignored
 cargo test --test postgres_governed_http_middleware -- --ignored
+cargo test --test postgres_work_claim_repository -- --ignored
 ```
 
 Run the complete suite before merging:

@@ -15,3 +15,4 @@ pub mod postgres_request_repository;
 pub mod postgres_route_repository;
 pub mod postgres_subscribed_instance_discovery;
 pub mod postgres_subscription_repository;
+pub mod postgres_work_claim_repository;
