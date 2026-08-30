@@ -147,17 +147,25 @@ impl SchemaVersionRefs {
 /// grant meant to authorize such actions, rather than a fabricated one-off
 /// ID per call site.
 ///
-/// These constants intentionally do not correspond to a row a schema
-/// publisher has to create out of band: nothing currently exposes
-/// `SchemaService::publish` over HTTP, and `authority_schema_versions.
-/// owner_service_id`/`authority_decisions.evaluator_service_id` are foreign
-/// keys into `identities`, which nothing yet links to an enrolled
-/// instance's signing `service_id` (ADR-0005 instance keys and ILK-001
-/// identities are separate, unconnected registries today). Until both gaps
-/// close, `AuthorityService::authorize` calls built on these constants will
-/// fail closed against a real Postgres backend (grant lookup and decision
-/// recording both hit the same `identities` foreign key), exactly as an
-/// unreachable dependency should.
+/// These constants intentionally do not correspond to a row anyone has to
+/// publish out of band: `SchemaService::publish` is now reachable over HTTP
+/// (`POST /v1/authority/schemas`), and every authority table's actor
+/// columns are `NOT NULL` foreign keys into `identities` -- including
+/// `service_instances.service_id`, which every enrolled instance is
+/// inserted under (`register_verified`). An instance cannot finish
+/// enrollment at all unless its claimed `service_id` already has an
+/// `identities` row (the enrollment binding itself carries the same
+/// foreign key), so any caller that reaches `AuthorityService::authorize`
+/// through a real signed request already satisfies it. What a real
+/// deployment still needs, out of band -- the same way grants and schema
+/// status already are -- is: an `identities` row and enrollment binding for
+/// each calling service (provisioned before it enrolls), an `identities`
+/// row for whatever `POLICY_EVALUATOR_ID` names, at least one grant under
+/// this schema-version pair for an action to actually be allowed, and a
+/// reachable evaluator process at `POLICY_EVALUATOR_AUTHORITY`. None of
+/// that is a code gap; `tests/postgres_authority_repository.rs`'s ignored
+/// integration tests already exercise this identity-then-schema-then-decision
+/// path end to end against a real Postgres backend.
 pub const NO_ARTIFACT_SCHEMA_VERSION: SchemaVersionId =
     SchemaVersionId::from_uuid(Uuid::from_u128(1));
 pub const NO_ARTIFACT_PERMISSION_POLICY_SCHEMA_VERSION: SchemaVersionId =

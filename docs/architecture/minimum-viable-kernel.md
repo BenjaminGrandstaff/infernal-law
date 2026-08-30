@@ -411,17 +411,26 @@ Implementation status:
   activates a schema or grants its publisher permission (ILK-002's own
   wording), so this route requires no ILK-002 authority decision, only
   authentication.
-- Pending, and still blocking any real (non-`503`) authority decision in
-  production even with the route above: a way to link an enrolled
-  instance's signing `service_id` to an `identities` row —
-  `authority_grants`, `authority_schema_versions`, and `authority_decisions`
-  all foreign-key every actor column to `identities`, but nothing today
-  creates that row for an enrolled instance. Until this closes, every
-  `authorize` call and every schema publish against a real Postgres backend
-  fails on that same foreign key, correctly, rather than an implicit allow.
-  Also pending: administrator-driven schema activation (`set_authority_schema_status`
-  is Postgres-only, not yet exposed administratively) for whatever schema
-  versions real artifact-bearing grants end up referencing (ADR-0013).
+- Correction to an earlier revision of this section: it claimed nothing
+  links an enrolled instance's signing `service_id` to an `identities` row.
+  That was wrong — `service_instances.service_id` (every enrolled
+  instance) and `service_enrollment_bindings.service_id` are both `NOT
+  NULL` foreign keys into `identities` already, so enrollment itself is
+  impossible under a `service_id` lacking an `identities` row. There is no
+  remaining code gap here.
+- Pending, for a real (non-`503`, non-default-deny) authority decision in
+  production: out-of-band provisioning — an `identities` row and
+  enrollment binding for each calling service, an `identities` row for
+  whatever `POLICY_EVALUATOR_ID` names, and at least one grant under
+  `NO_ARTIFACT_SCHEMA_VERSION`/`NO_ARTIFACT_PERMISSION_POLICY_SCHEMA_VERSION`
+  for an action to actually be allowed — the same administrative pattern
+  grants and schema status already use, not new code.
+  `tests/postgres_authority_repository.rs`'s ignored integration tests
+  already exercise the identity-then-schema-then-decision path end to end
+  against a real Postgres backend. Also pending: administrator-driven
+  schema activation (`set_authority_schema_status` is Postgres-only, not
+  yet exposed administratively) for whatever schema versions real
+  artifact-bearing grants end up referencing (ADR-0013).
 - The existing signature, replay, and communication-admission gate is the
   required precondition and MUST remain ahead of this authority step.
 

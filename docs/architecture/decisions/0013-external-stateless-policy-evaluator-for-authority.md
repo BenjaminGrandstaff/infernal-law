@@ -193,10 +193,17 @@ these calls use a reserved schema-version pair
 (`NO_ARTIFACT_SCHEMA_VERSION`/`NO_ARTIFACT_PERMISSION_POLICY_SCHEMA_VERSION`
 in `src/kernel/authority.rs`) rather than a fabricated one-off ID.
 `POST /v1/authority/schemas` now exposes `SchemaService::publish` over HTTP
-(any authenticated caller may publish for names it owns), closing one gap
-that kept this fail-closed. One gap remains: nothing links an enrolled
-instance's signing `service_id` to an `identities` row, which
-`authority_grants`/`authority_schema_versions`/`authority_decisions` all
-foreign-key every actor column to — so a real Postgres backend still
-rejects the grant lookup and decision recording `authorize` needs, correctly
-failing closed rather than an implicit allow.
+(any authenticated caller may publish for names it owns), closing the gap
+this section previously described here.
+
+Correction: an earlier revision of this section also claimed that nothing
+links an enrolled instance's signing `service_id` to an `identities` row.
+That was wrong — `service_instances.service_id` (where `register_verified`
+inserts every enrolled instance) and `service_enrollment_bindings.service_id`
+are both `NOT NULL` foreign keys into `identities` already, so an instance
+cannot finish enrollment at all under a `service_id` lacking an `identities`
+row. What a real deployment still needs is out-of-band provisioning — an
+`identities` row and enrollment binding per calling service, an `identities`
+row for `POLICY_EVALUATOR_ID`, and at least one grant under the no-artifact
+schema-version pair — the same administrative pattern grants and schema
+status already use, not a missing code path.

@@ -199,10 +199,11 @@ never claim ownership on another service's behalf. Create and disable
 additionally run ILK-002 Authority's evaluate-and-record step (Step 8 above,
 via `Application::authority_service`) before mutating; list does not, since
 it changes no governed administrative state. An unconfigured or unreachable
-evaluator, or a deny verdict, fails closed rather than an implicit allow —
-see [ADR-0013](decisions/0013-external-stateless-policy-evaluator-for-authority.md)
-and `NO_ARTIFACT_SCHEMA_VERSION` in `src/kernel/authority.rs` for why a real
-deployment cannot yet produce an `allow` here. Public health, initial
+evaluator, or a deny verdict, fails closed rather than an implicit allow.
+An `allow` additionally requires the same out-of-band provisioning grants
+and schema status already need — see
+[ADR-0013](decisions/0013-external-stateless-policy-evaluator-for-authority.md)
+and `NO_ARTIFACT_SCHEMA_VERSION` in `src/kernel/authority.rs`. Public health, initial
 enrollment, and the kernel-identity routes remain outside governed-request
 authentication by design. The kernel-identity route
 (`GET /v1/kernel-identity`) publishes this process's current public signing

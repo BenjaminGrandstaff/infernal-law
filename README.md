@@ -38,9 +38,10 @@ It listens on `0.0.0.0:8080` by default and provides:
   authority decision from the evaluator configured by
   `POLICY_EVALUATOR_AUTHORITY` (its host, no scheme or path) and
   `POLICY_EVALUATOR_ID` (its `service_id`, a UUID) — unset or unreachable,
-  these routes fail closed with `503` rather than an implicit allow. See
-  [`NO_ARTIFACT_SCHEMA_VERSION`](src/kernel/authority.rs) for why a real
-  deployment cannot yet produce an `allow` here.
+  these routes fail closed with `503` rather than an implicit allow. An
+  `allow` additionally requires out-of-band provisioning (an `identities`
+  row and enrollment binding per calling service, one for the evaluator,
+  and a grant) — see [`NO_ARTIFACT_SCHEMA_VERSION`](src/kernel/authority.rs).
 - `POST /v1/authority/schemas` — publishes an ILK-002 schema version
   (`{"kind": "artifact"|"permission_policy", "name": "...", "content_digest":
   "<base64url>"}`) owned by the caller's own verified identity. Publishing
