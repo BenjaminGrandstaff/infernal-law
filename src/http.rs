@@ -357,9 +357,21 @@ where
             .work_claims
             .active_route_ids(&route_ids, now)
             .map_err(|error| RequestError::Repository(error.to_string()))?;
+        // A route's completion is permanent, unlike an active claim's
+        // lease -- excluding only currently-active claims let a route
+        // whose claim had already completed (not merely expired) become
+        // eligible again forever, letting it be claimed and "completed" an
+        // unbounded number of times. Confirmed live: a worker with no
+        // competing claimant reclaimed and re-completed the same route
+        // repeatedly, each time minting a new, strictly higher fencing
+        // token, with nothing to ever stop it.
+        let completed = self
+            .work_claims
+            .completed_route_ids(&route_ids)
+            .map_err(|error| RequestError::Repository(error.to_string()))?;
         Ok(routes
             .into_iter()
-            .filter(|route| !claimed.contains(&route.id()))
+            .filter(|route| !claimed.contains(&route.id()) && !completed.contains(&route.id()))
             .collect())
     }
 }
@@ -752,6 +764,13 @@ impl GovernedErrorResponse {
         Self {
             code: "route_already_claimed",
             message: "route already has an active claim",
+        }
+    }
+
+    const fn route_already_completed() -> Self {
+        Self {
+            code: "route_already_completed",
+            message: "route has already been completed",
         }
     }
 
@@ -1506,6 +1525,10 @@ fn work_claim_error_response(error: &WorkClaimError) -> Response {
         WorkClaimError::AlreadyClaimed(_) => json_response(
             "409 Conflict",
             &GovernedErrorResponse::route_already_claimed(),
+        ),
+        WorkClaimError::AlreadyCompleted(_) => json_response(
+            "409 Conflict",
+            &GovernedErrorResponse::route_already_completed(),
         ),
         WorkClaimError::Fenced => {
             json_response("409 Conflict", &GovernedErrorResponse::claim_fenced())
@@ -3324,6 +3347,9 @@ mod tests {
                     Some(claim) if claim.is_current(now) => {
                         return Err(WorkClaimError::AlreadyClaimed(route_id));
                     }
+                    Some(claim) if matches!(claim.status(), WorkClaimStatus::Completed) => {
+                        return Err(WorkClaimError::AlreadyCompleted(route_id));
+                    }
                     Some(claim) => claim.fencing_token() + 1,
                     None => 1,
                 };
@@ -3404,6 +3430,23 @@ mod tests {
                     .unwrap()
                     .iter()
                     .filter(|claim| route_ids.contains(&claim.route_id()) && claim.is_current(now))
+                    .map(WorkClaim::route_id)
+                    .collect())
+            }
+
+            fn completed_route_ids(
+                &self,
+                route_ids: &[RouteId],
+            ) -> Result<HashSet<RouteId>, WorkClaimError> {
+                Ok(self
+                    .claims
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|claim| {
+                        route_ids.contains(&claim.route_id())
+                            && claim.status() == WorkClaimStatus::Completed
+                    })
                     .map(WorkClaim::route_id)
                     .collect())
             }
@@ -3854,6 +3897,23 @@ mod tests {
                     .map(WorkClaim::route_id)
                     .collect())
             }
+
+            fn completed_route_ids(
+                &self,
+                route_ids: &[RouteId],
+            ) -> Result<HashSet<RouteId>, WorkClaimError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|claim| {
+                        route_ids.contains(&claim.route_id())
+                            && claim.status() == WorkClaimStatus::Completed
+                    })
+                    .map(WorkClaim::route_id)
+                    .collect())
+            }
         }
 
         fn route(destination: ActorId, created_at: i64) -> Route {
@@ -3915,6 +3975,43 @@ mod tests {
             let response = list_eligible_routes(destination, &route_service, &claim_service);
 
             assert!(response.body.contains(&expired_route.id().to_string()));
+        }
+
+        #[test]
+        fn a_completed_route_never_becomes_eligible_again() {
+            // Confirmed live against a real cluster: with only
+            // active_route_ids excluding claimed routes, a completed
+            // claim (terminal, not "active") left its route eligible
+            // forever, so a worker with nothing competing for it
+            // reclaimed and re-completed the same route repeatedly, each
+            // time minting a new, strictly higher fencing token, with
+            // nothing to ever stop it -- directly contradicting this
+            // route's own "excluding completed routes" requirement.
+            let destination = ActorId::new();
+            let routes = MemoryRoutes::default();
+            let completed_route = route(destination, 1);
+            routes.seed(completed_route.clone());
+            let work_claims = MemoryWorkClaims::default();
+            let mut completed = claim(completed_route.id(), unix_time() - 50);
+            completed = WorkClaim::restore(
+                completed.id(),
+                completed.route_id(),
+                completed.worker_service(),
+                completed.worker_instance(),
+                completed.fencing_token(),
+                WorkClaimStatus::Completed,
+                completed.claimed_at(),
+                completed.lease_expires_at(),
+            )
+            .unwrap();
+            work_claims.seed(completed);
+            let route_service = RouteService::new(routes);
+            let claim_service = WorkClaimService::new(work_claims);
+
+            let response = list_eligible_routes(destination, &route_service, &claim_service);
+
+            assert_eq!(response.status, "200 OK");
+            assert!(!response.body.contains(&completed_route.id().to_string()));
         }
 
         #[test]

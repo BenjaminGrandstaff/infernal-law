@@ -159,20 +159,26 @@ fn work_claims_are_atomic_fenced_and_append_only() {
         "a completed claim must not make its route look currently claimed"
     );
 
-    let second = application
-        .work_claims()
-        .claim(route.id(), destination.id(), worker_instance, 600, 50)
-        .unwrap();
-    assert_eq!(second.fencing_token(), 2);
+    // A completed route's claim is terminal, unlike an expired lease --
+    // confirmed live against a real cluster that without this check, a
+    // completed route stayed reclaimable indefinitely, minting a new,
+    // strictly higher fencing token every time.
     assert_eq!(
         application
             .work_claims()
-            .active_route_ids(&[route.id()], 50)
-            .unwrap(),
-        HashSet::from([route.id()])
+            .claim(route.id(), destination.id(), worker_instance, 600, 50),
+        Err(WorkClaimError::AlreadyCompleted(route.id()))
+    );
+    assert!(
+        application
+            .work_claims()
+            .completed_route_ids(&[route.id()])
+            .unwrap()
+            .contains(&route.id()),
+        "a completed route must be reported as completed, not merely inactive"
     );
 
-    assert_database_guards(first.id(), second.id());
+    assert_database_guards(completed.id(), completed.id());
 }
 
 fn assert_database_guards(

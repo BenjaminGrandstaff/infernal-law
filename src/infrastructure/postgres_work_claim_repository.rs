@@ -49,6 +49,8 @@ const TRANSITION_SQL: &str = "UPDATE work_claims SET status = $2 WHERE claim_id 
               fencing_token, status, claimed_at, lease_expires_at";
 const ACTIVE_ROUTE_IDS_SQL: &str = "SELECT DISTINCT route_id::text FROM work_claims \
     WHERE route_id::text = ANY($1) AND status = 'active' AND lease_expires_at > $2";
+const COMPLETED_ROUTE_IDS_SQL: &str = "SELECT DISTINCT route_id::text FROM work_claims \
+    WHERE route_id::text = ANY($1) AND status = 'completed'";
 
 #[derive(Clone)]
 pub struct PostgresWorkClaimRepository {
@@ -102,6 +104,15 @@ impl WorkClaimRepository for PostgresWorkClaimRepository {
         let next_fencing_token = match &latest {
             Some(claim) if claim.is_current(now) => {
                 return Err(WorkClaimError::AlreadyClaimed(route_id));
+            }
+            // A route's completion is permanent, unlike an active claim's
+            // lease -- checked ahead of any expiry timing so a completed
+            // route is never reclaimable no matter how much time has
+            // passed. Confirmed live: without this, a route whose only
+            // claim had already completed (not merely expired) was
+            // reclaimable indefinitely.
+            Some(claim) if matches!(claim.status(), WorkClaimStatus::Completed) => {
+                return Err(WorkClaimError::AlreadyCompleted(route_id));
             }
             Some(claim) => {
                 if matches!(claim.status(), WorkClaimStatus::Active) {
@@ -194,6 +205,29 @@ impl WorkClaimRepository for PostgresWorkClaimRepository {
         let mut connection = self.database.connection().map_err(repository_error)?;
         connection
             .query(ACTIVE_ROUTE_IDS_SQL, &[&route_ids, &now])
+            .map_err(repository_error)?
+            .iter()
+            .map(|row| {
+                row.get::<_, String>("route_id")
+                    .parse::<RouteId>()
+                    .map_err(|_| {
+                        WorkClaimError::Repository("stored route ID is invalid".to_owned())
+                    })
+            })
+            .collect()
+    }
+
+    fn completed_route_ids(
+        &self,
+        route_ids: &[RouteId],
+    ) -> Result<HashSet<RouteId>, WorkClaimError> {
+        if route_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let route_ids: Vec<String> = route_ids.iter().map(ToString::to_string).collect();
+        let mut connection = self.database.connection().map_err(repository_error)?;
+        connection
+            .query(COMPLETED_ROUTE_IDS_SQL, &[&route_ids])
             .map_err(repository_error)?
             .iter()
             .map(|row| {

@@ -54,6 +54,9 @@ impl WorkClaimRepository for MemoryWorkClaims {
             Some(claim) if claim.is_current(now) => {
                 return Err(WorkClaimError::AlreadyClaimed(route_id));
             }
+            Some(claim) if matches!(claim.status(), WorkClaimStatus::Completed) => {
+                return Err(WorkClaimError::AlreadyCompleted(route_id));
+            }
             Some(claim) => {
                 let fencing_token = claim.fencing_token();
                 if matches!(claim.status(), WorkClaimStatus::Active) {
@@ -162,6 +165,23 @@ impl WorkClaimRepository for MemoryWorkClaims {
             .unwrap()
             .iter()
             .filter(|claim| route_ids.contains(&claim.route_id()) && claim.is_current(now))
+            .map(WorkClaim::route_id)
+            .collect())
+    }
+
+    fn completed_route_ids(
+        &self,
+        route_ids: &[RouteId],
+    ) -> Result<HashSet<RouteId>, WorkClaimError> {
+        Ok(self
+            .claims
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|claim| {
+                route_ids.contains(&claim.route_id())
+                    && claim.status() == WorkClaimStatus::Completed
+            })
             .map(WorkClaim::route_id)
             .collect())
     }
@@ -340,6 +360,31 @@ fn completion_is_terminal_and_cannot_be_renewed_or_released_afterward() {
     assert_eq!(
         claims.release(claim.id(), claim.fencing_token(), 6),
         Err(WorkClaimError::Fenced)
+    );
+}
+
+#[test]
+fn a_completed_route_can_never_be_reclaimed_no_matter_how_much_time_passes() {
+    // Confirmed live against a real cluster: a completed route's claim
+    // was terminal, but the claim() path only checked whether the latest
+    // claim was still *current* (unexpired) -- once enough simulated time
+    // passed, a completed route looked exactly like an expired one and
+    // was reclaimable again, unboundedly, each time minting a new,
+    // strictly higher fencing token.
+    let destination = ActorId::new();
+    let route_id = RouteId::new();
+    let repository = MemoryWorkClaims::with_route(route_id, destination);
+    let claims = WorkClaimService::new(repository);
+    let claim = claims
+        .claim(route_id, destination, InstanceId::new(), 1_000, 0)
+        .unwrap();
+    claims
+        .complete(claim.id(), claim.fencing_token(), 5)
+        .unwrap();
+
+    assert_eq!(
+        claims.claim(route_id, destination, InstanceId::new(), 999_999, 999_998),
+        Err(WorkClaimError::AlreadyCompleted(route_id))
     );
 }
 

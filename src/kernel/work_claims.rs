@@ -212,11 +212,23 @@ pub trait WorkClaimRepository: Send + Sync {
     /// Returns which of `route_ids` currently have a live, unexpired
     /// active claim -- the read an eligible-route query (ADR-0011) uses to
     /// exclude routes that are already being worked. A route absent from
-    /// the returned set is eligible to claim.
+    /// the returned set is eligible to claim, unless it is also completed
+    /// -- see [`WorkClaimRepository::completed_route_ids`], a distinct
+    /// concept this method does not cover.
     fn active_route_ids(
         &self,
         route_ids: &[RouteId],
         now: i64,
+    ) -> Result<HashSet<RouteId>, WorkClaimError>;
+
+    /// Returns which of `route_ids` have ever reached a terminal
+    /// `Completed` claim. Unlike [`WorkClaimRepository::active_route_ids`],
+    /// this is not time-bounded: a route's completion is permanent, so the
+    /// eligible-route query (ADR-0011) must exclude it forever, not only
+    /// while some claim on it happens to still be active.
+    fn completed_route_ids(
+        &self,
+        route_ids: &[RouteId],
     ) -> Result<HashSet<RouteId>, WorkClaimError>;
 }
 
@@ -305,6 +317,13 @@ where
         }
         self.repository.active_route_ids(route_ids, now)
     }
+
+    pub fn completed_route_ids(
+        &self,
+        route_ids: &[RouteId],
+    ) -> Result<HashSet<RouteId>, WorkClaimError> {
+        self.repository.completed_route_ids(route_ids)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -315,6 +334,11 @@ pub enum WorkClaimError {
     InvalidTimestamp,
     RouteNotFound(RouteId),
     AlreadyClaimed(RouteId),
+    /// The route's most recent claim already reached the terminal
+    /// `Completed` status. A route's completion is permanent -- unlike an
+    /// expired lease, it is never reclaimable, no matter how much time has
+    /// passed.
+    AlreadyCompleted(RouteId),
     NotFound(ClaimId),
     Fenced,
     Repository(String),
@@ -331,6 +355,7 @@ impl Display for WorkClaimError {
             Self::InvalidTimestamp => formatter.write_str("timestamp must not be negative"),
             Self::RouteNotFound(id) => write!(formatter, "route {id} was not found"),
             Self::AlreadyClaimed(id) => write!(formatter, "route {id} is already claimed"),
+            Self::AlreadyCompleted(id) => write!(formatter, "route {id} is already completed"),
             Self::NotFound(id) => write!(formatter, "claim {id} was not found"),
             Self::Fenced => {
                 formatter.write_str("fencing token does not match the current active claim")
