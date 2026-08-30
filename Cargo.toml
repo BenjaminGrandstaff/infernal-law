@@ -9,7 +9,7 @@ rust-version = "1.85"
 base64 = "0.22.1"
 ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
 getrandom = { version = "0.4.3", features = ["sys_rng"] }
-infernal-client-rs = { git = "https://github.com/BenjaminGrandstaff/infernal-client-rs", rev = "3585763d0b1ed395680e62f2743d655a499e7f59" }
+infernal-client-rs = { git = "https://github.com/BenjaminGrandstaff/infernal-client-rs", rev = "be3244add8899e253686cdccdf59d8ea71ea79ac" }
 r2d2_postgres = "0.18.2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
