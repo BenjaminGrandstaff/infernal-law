@@ -1471,14 +1471,20 @@ content mediation, or events.
 
 ## 7. Current MVP implementation status
 
-Everything tagged **MVP Kernel — Complete** in Section 5 requires no
-further work for `v0.1.0`: ILK-001 (Identity), ILK-002's request-acceptance
-authority, ILK-003's immutable requests, inclusive route materialization,
-and destination-scoped request read (`GET /v1/routes/{route_id}/request`),
-ILK-004, ILK-007's authority-decision evidence, ILK-008's per-capability
-audit, ILK-010's inclusive subscriptions, and ILK-011's claim/renew/
-release/complete with fencing *and* the eligible-route query
-(`GET /v1/routes/eligible`).
+Every MVP-scoped portion of Section 5 is Complete and requires no further
+work for `v0.1.0` — most of these ILKs are tagged **Split** there, not
+bare **MVP Kernel**, so "Complete" here means their MVP portion
+specifically, not that nothing about them is Kernel 1.0: ILK-001's
+identity/instance/signing/replay/attribution invariants (Split —
+production identity lifecycle hardening is Kernel 1.0), ILK-002's
+request-acceptance authority (Split), ILK-003's immutable requests,
+inclusive route materialization, and destination-scoped request read
+(`GET /v1/routes/{route_id}/request`) (Split), ILK-004 (MVP Kernel, in
+full), ILK-007's authority-decision evidence (Split), ILK-008's
+per-capability audit (MVP Kernel, in full), ILK-010's inclusive
+subscriptions (Split), and ILK-011's claim/renew/release/complete with
+fencing *and* the eligible-route query (`GET /v1/routes/eligible`)
+(Split).
 
 Every kernel capability the vertical slice needs is now code-complete.
 `infernal-taskmaster-simple`'s FIFO scheduler calls the eligible-route
