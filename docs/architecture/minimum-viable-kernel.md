@@ -572,7 +572,16 @@ Implementation status:
   `create_authority_grant`, moving a schema through Published →
   Active/Retired → Suspended/Superseded/Retired with append-only status
   audit; superseded and retired are terminal and the Rust kernel never
-  calls this function directly.
+  calls this function directly. Both functions were first actually
+  exercised against live PostgreSQL only when this repository's kernel
+  was deployed and tested in a real Kubernetes cluster, which surfaced
+  and fixed two bugs invisible to every prior (in-memory or never-run)
+  test: `set_authority_schema_status` declared a PL/pgSQL variable named
+  `current_schema`, a reserved identifier PostgreSQL parses as its own
+  built-in construct (like `current_user`), breaking on the first real
+  invocation; and the Rust query for `publish_authority_schema_version`
+  read its result with `SELECT *`, returning raw `uuid`-typed columns
+  where every other query in the file casts IDs to `::text` first.
 - Complete: durable decision pinning. `AuthorityService::authorize` mints a
   `DecisionId` and calls a new `AuthorityDecisionRecorder` dependency
   before ever returning a decision; recording failure fails `authorize`
@@ -1353,7 +1362,7 @@ The MVP MUST prove:
 | Concurrent claims produce exactly one valid owner | `concurrent_claim_attempts_on_the_same_route_produce_exactly_one_active_holder` | Done |
 | An expired claim can be acquired by another worker | `another_worker_can_claim_after_the_prior_lease_expires` | Done |
 | A stale worker cannot complete after fencing/reassignment | `a_stale_holder_cannot_renew_release_or_complete_after_losing_its_claim` | Done |
-| Kernel restart does not lose accepted Requests, routes, claims, authority decisions, or required audit state | `tests/postgres_request_repository.rs`, `tests/postgres_route_repository.rs`, `tests/postgres_work_claim_repository.rs`, `tests/postgres_authority_repository.rs` (all ignored, live-DB) | Proven per-capability; **not yet proven as one continuous restart test spanning the whole vertical slice** — see Section 7 |
+| Kernel restart does not lose accepted Requests, routes, claims, authority decisions, or required audit state | `tests/postgres_request_repository.rs`, `tests/postgres_route_repository.rs`, `tests/postgres_work_claim_repository.rs`, `tests/postgres_authority_repository.rs` (all ignored, live-DB) | **Now actually run, not just written**: every `#[ignore]`d live-Postgres test in the repo (13 files) has been executed against a real PostgreSQL instance (a `kind` Kubernetes cluster) and passes, run individually as documented — the first time in this project's history. Proven per-capability; not yet proven as one continuous restart test spanning the whole vertical slice in a single test — see Section 7 |
 
 Do not require unrelated generalized features before tagging the MVP: none
 of these proofs depend on exclusive delivery, `all_of` selectors, artifact
@@ -1375,23 +1384,46 @@ Every kernel capability the vertical slice needs is now code-complete.
 query and proposes claims; `infernal-worker-simple` claims its own
 eligible work, reads the request behind it, and completes it — both
 reference services' signing, parsing, and policy logic are proven
-independent of a live kernel connection, in their own repositories. What
-remains before tagging `v0.1.0` is validation, not new capability:
+independent of a live kernel connection, in their own repositories.
 
-1. **Run the whole path — submit, materialize, claim, read, complete —
-   against a real, enrolled deployment** (real ADR-0008 Kubernetes
-   TokenReview enrollment and a reachable HTTPS kernel are deployment
-   infrastructure, not something any of the unit/contract test suites in
-   this repo or the two reference-service repos can provide).
+The kernel, `infernal-inquisitor-simple`, `infernal-taskmaster-simple`,
+and `infernal-worker-simple` have all been built as containers, deployed
+together into a real Kubernetes cluster, and exercised there. That pass
+found and fixed two real bugs in `set_authority_schema_status`/
+`publish_authority_schema_version` — a reserved-identifier collision
+(`current_schema`, a PL/pgSQL built-in like `current_user`) and a raw
+`uuid`-typed column read where every other query in the file casts to
+`::text` — both invisible until this was the first time either function
+actually ran against real PostgreSQL. It also confirmed, directly, all 13
+`#[ignore]`d live-Postgres test files pass individually (the documented
+usage), and that `infernal-taskmaster-simple`/`infernal-worker-simple`
+start, configure correctly, and log a clear transport error rather than
+crashing when their signed calls can't complete — because
+`infernal-client-rs`'s `SignedRequest` always dials
+`https://<authority>`, while `infernal-law`'s own Kubernetes `Service`
+does not terminate TLS. A TLS-terminating layer in front of the kernel is
+a real, confirmed requirement for those two services to actually complete
+a call, not merely attempt one — deployment infrastructure, not a kernel
+code gap.
+
+What remains before tagging `v0.1.0` is finishing that validation, not new
+capability:
+
+1. **Add a TLS-terminating layer in front of the kernel and complete real
+   ADR-0008 Kubernetes TokenReview enrollment** for the reference
+   services' identities, then run the whole path — submit, materialize,
+   claim, read, complete — as one real signed round trip end to end.
 2. **Close any remaining transaction/idempotency gaps exposed by that
    end-to-end path** — the individual pieces (acceptance, materialization,
    eligible-route query, claim, routed-request read, completion) are each
-   already transactional or a plain read of already-committed state; this
-   step is about confirming that, end-to-end.
+   already transactional or a plain read of already-committed state, and
+   are each independently proven against live PostgreSQL; this step is
+   about confirming that holds true chained together in one request's
+   lifetime.
 3. **Run the required retry, denial, crash/recovery, concurrency, and
    fencing tests** ([Section 6](#6-mvp-failurerecovery-acceptance-tests))
-   as one continuous scenario, including the restart proof that today only
-   exists per-capability.
+   as one continuous scenario, including the restart proof that today is
+   proven per-capability, not yet chained into a single scenario.
 
 See the [completion checklist](#remaining-work-before-v010-minimum-viable-kernel)
 at the end of this document for the same list in one place.
@@ -1924,17 +1956,23 @@ the affected `ILK-*` requirements.
 Every kernel capability and reference service the vertical slice needs is
 code-complete: `infernal-taskmaster-simple` queries eligible routes and
 proposes claims, and `infernal-worker-simple` claims its own eligible
-work, reads the request behind it, and completes it. What is left is
-validation, not new capability:
+work, reads the request behind it, and completes it. All four services
+(the kernel plus all three reference services) build as containers,
+deploy into a real Kubernetes cluster, and start correctly; the full
+live-Postgres test suite has actually been run against real PostgreSQL
+and passes. What is left is finishing that validation, not new capability:
 
-- Run the whole path — submit, materialize, claim, read, complete —
-  against a real, enrolled deployment (this needs real ADR-0008
-  Kubernetes TokenReview enrollment and a reachable HTTPS kernel; no
-  unit/contract test suite, in this repo or either reference-service
-  repo, can provide that).
+- Add a TLS-terminating layer in front of the kernel's Kubernetes
+  `Service` (confirmed required: `infernal-client-rs`'s outbound signed
+  calls always dial `https://`, and the kernel's `Service` does not
+  terminate TLS) and complete real ADR-0008 Kubernetes TokenReview
+  enrollment for the reference services' identities, then run the whole
+  path — submit, materialize, claim, read, complete — as one real signed
+  round trip.
 - Confirm required request/route/claim/completion/audit state is durably
-  recorded across that end-to-end path (already true per-capability; this
-  is an end-to-end confirmation, not new invariants).
+  recorded across that end-to-end path (already true per-capability,
+  proven against live PostgreSQL; this is a confirmation that it holds
+  chained together, not new invariants).
 - Close any transaction/idempotency gaps exposed by that end-to-end path.
 - Pass the required retry, denial, crash/recovery, concurrency, and
   fencing tests ([Section 6](#6-mvp-failurerecovery-acceptance-tests)) as
