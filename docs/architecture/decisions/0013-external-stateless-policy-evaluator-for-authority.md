@@ -174,3 +174,13 @@ policy evaluator process holds no state of its own, so restarting it with a
 completely fresh process changes nothing about previously recorded decisions;
 and a request or route already denied is never retroactively authorized by a
 later policy change.
+
+## Reference implementation
+
+[`infernal-inquisitor-simple`](https://github.com/BenjaminGrandstaff/infernal-inquisitor-simple)
+implements this evaluator: it verifies the kernel's signed call against the
+kernel's self-published identity ([ADR-0014](0014-publish-kernel-identity-endpoint.md))
+using `infernal-client-rs`'s `verify_incoming`, then applies the trivial
+"allow if a grant matched" policy the kernel already narrowed the request
+to. It holds no data of its own, matching the statelessness this ADR
+requires.

@@ -383,11 +383,18 @@ Implementation status:
   refined design, only the kernel's outbound call is signed at the
   application layer; the evaluator's response is trusted over the same
   HTTPS connection the kernel itself opened, not by a second signature.
-- Pending: a reference external policy evaluator service to actually call,
-  wiring `HttpPolicyEvaluator` into `Application`/`ServiceRequestGate`
-  (which needs a configured evaluator endpoint and, ultimately, a running
-  evaluator to reach), and schema registration/activation for whatever
-  schema versions real grants end up referencing (ADR-0013).
+- Complete: a reference external policy evaluator service,
+  [`infernal-inquisitor-simple`](https://github.com/BenjaminGrandstaff/infernal-inquisitor-simple),
+  exists to actually call — it verifies the kernel's signed request against
+  the kernel's self-published identity using `infernal-client-rs`'s own
+  `verify_incoming`, then applies the same "allow if a grant matched" shape
+  of policy `HttpPolicyEvaluator` expects a verdict for. Its own test suite
+  proves this against a live (if fake) kernel-identity HTTP server, not just
+  in-process values.
+- Pending: wiring `HttpPolicyEvaluator` into `Application`/`ServiceRequestGate`
+  (which needs a configured evaluator endpoint, and, in a real deployment, a
+  running evaluator process to reach), and schema registration/activation
+  for whatever schema versions real grants end up referencing (ADR-0013).
 - The existing signature, replay, and communication-admission gate is the
   required precondition and MUST remain ahead of this authority step.
 

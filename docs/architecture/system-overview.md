@@ -58,7 +58,8 @@ work from process memory or a local filesystem.
   allow/deny verdict. The kernel owns identity, grants, schema
   registration/activation, and audit; the verdict itself comes from an
   external, stateless policy evaluator — see
-  [ADR-0013](decisions/0013-external-stateless-policy-evaluator-for-authority.md).
+  [ADR-0013](decisions/0013-external-stateless-policy-evaluator-for-authority.md)
+  and the reference `infernal-inquisitor-simple` implementation.
 - Capabilities beyond the documented [minimum viable kernel](minimum-viable-kernel.md)
   until they are separately specified
 
