@@ -252,8 +252,25 @@ parent request for any other destination.
 
 ### Transaction boundary
 
-**MVP Kernel** — for an accepted mutating request, the following effects
-MUST form one atomic transaction where applicable:
+**MVP Kernel** — for every governed MVP mutation, all kernel-owned durable
+state required for that mutation MUST commit atomically before the kernel
+reports success or releases an externally visible governed effect. The
+kernel MUST NOT report success for a governed mutation if only part of
+its required kernel-owned state became durable.
+
+Depending on the operation, that state may include:
+
+- request acceptance and semantic fingerprint;
+- authority decision evidence;
+- subscription state;
+- route materialization;
+- work-claim, lease, and fencing state;
+- completion state;
+- replay and idempotency state;
+- required audit evidence.
+
+Concretely, for an accepted mutating request this means the following
+effects MUST form one atomic transaction where applicable:
 
 1. validate identity, signature, freshness, replay, communication
    admission, request shape, schema activation, authority, and
@@ -269,6 +286,15 @@ MUST form one atomic transaction where applicable:
 
 The kernel reports success only after this transaction commits. Delivery
 of a committed event to a subscriber MAY occur asynchronously.
+
+This rule applies only to kernel-owned state. It does NOT imply that
+domain artifact content, domain databases, search indexes, or other
+service-owned persistence participate in the same PostgreSQL transaction
+— see [Section 11](#11-namespace-data-and-search-ownership) for that
+ownership boundary. Future capabilities such as artifact-content
+mediation and typed events MUST define their own durability and
+atomicity requirements when those capabilities are introduced, rather
+than inheriting this one by default.
 
 ## 3. MVP definition
 
