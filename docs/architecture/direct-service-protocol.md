@@ -190,12 +190,17 @@ enabled. Authentication and replay failures use a sanitized `401`; disabled
 communication uses a deterministic sanitized `403`; unavailable persistence
 uses a sanitized `503`.
 
-Known subscription paths are wired through this boundary, but currently return
-`501` after successful admission because ILK-002 Authority and the governed
-handlers are not implemented. This preserves fail-closed behavior while making
-the transport boundary executable and testable. Public health, initial
-enrollment, and the kernel-identity routes remain outside governed-request
-authentication by design. The kernel-identity route
+Subscription paths (`POST`/`GET /v1/subscriptions`, `DELETE
+/v1/subscriptions/{id}`) are wired through this boundary and, after
+successful admission, dispatch to ILK-010's real create/list/disable
+handlers rather than a placeholder response. The caller's verified identity
+is the only service identity these handlers ever act as — a request body can
+never claim ownership on another service's behalf. ILK-002 Authority's
+evaluate-and-record step (Step 8 above) is not yet called from this path, so
+these handlers are authenticated and ownership-scoped but not yet
+authorization-evaluated; that integration remains pending. Public health,
+initial enrollment, and the kernel-identity routes remain outside
+governed-request authentication by design. The kernel-identity route
 (`GET /v1/kernel-identity`) publishes this process's current public signing
 key so a caller can verify a kernel-signed message (see
 [ADR-0014](decisions/0014-publish-kernel-identity-endpoint.md)); publishing a

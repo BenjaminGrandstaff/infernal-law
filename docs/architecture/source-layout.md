@@ -10,9 +10,11 @@ library modules:
 src/
 ├── main.rs                 # thin executable entry point
 ├── lib.rs                  # public library boundary
-├── http.rs                 # HTTP transport and colocated unit tests
+├── http.rs                 # HTTP transport, governed-route dispatch, and
+│                            # colocated unit tests
 ├── http/
-│   └── enrollment_dto.rs   # strict initial-enrollment JSON profile
+│   ├── enrollment_dto.rs   # strict initial-enrollment JSON profile
+│   └── subscription_dto.rs # ILK-010 subscription JSON wire format
 ├── infrastructure/
 │   ├── mod.rs              # external-system adapter boundary
 │   ├── database.rs         # pooled PostgreSQL and pgvector wiring

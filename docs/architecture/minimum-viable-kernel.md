@@ -708,11 +708,22 @@ Implementation status:
   signed proof-of-possession reconciliation; append-only handshake persistence;
   failure isolation; fresh-handshake delivery gate; and isolated plus live
   persistence tests.
+- Complete: signed REST operations for the subscription lifecycle —
+  `POST /v1/subscriptions` (create), `GET /v1/subscriptions` (history, or
+  active-only via `?active=true`), and `DELETE /v1/subscriptions/{id}`
+  (disable) — dispatched from `src/http.rs` only after the existing
+  signature/replay/admission gate admits the request. The caller's own
+  verified identity (`VerifiedServiceRequest::service_id`), never a
+  request-body field, is what the domain layer uses as the owning service,
+  so a caller can only ever create, list, or disable its own subscriptions;
+  disabling another service's subscription is indistinguishable from
+  disabling one that does not exist. These routes no longer return `501`.
 - Pending: typed delivery modes, consumer groups, immutable all-of state
-  selectors, signed REST operations, ILK-002 authorization integration, pending
-  request backlog matching, fenced route assignment and completion, delivery
-  cursors, production outbound handshake transport, and the eligible-route
-  query contract external scheduler services will use (ADR-0011).
+  selectors, ILK-002 authorization integration on top of the ownership check
+  above, pending request backlog matching, fenced route assignment and
+  completion, delivery cursors, production outbound handshake transport, and
+  the eligible-route query contract external scheduler services will use
+  (ADR-0011).
 - Out of kernel scope: capacity-aware delivery, worker/node placement, and
   retry-timing policy. Those belong to an external scheduler service, not the
   kernel (ADR-0011).

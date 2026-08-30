@@ -15,6 +15,7 @@ use crate::kernel::enrollment::{
     EnrollmentBindingRepository, EnrollmentError, EnrollmentRequest, EnrollmentService,
     WorkloadTokenReviewer,
 };
+use crate::kernel::identity::ActorId;
 use crate::kernel::instance_keys::InstancePublicKey;
 use crate::kernel::instance_registry::{InstanceRegistryRepository, RegisteredInstance};
 use crate::kernel::request_gate::{
@@ -23,14 +24,21 @@ use crate::kernel::request_gate::{
 use crate::kernel::service_requests::{
     ServiceRequestAuthenticationError, ServiceRequestParts, SignedServiceRequest,
 };
+use crate::kernel::subscriptions::{
+    SubscriptionError, SubscriptionId, SubscriptionRepository, SubscriptionService,
+};
 use crate::kernel::{admission::AdmissionError, replay_protection::ReplayProtectionError};
 use crate::wiring::Application;
 
 use self::enrollment_dto::{
     EnrollmentErrorResponse, EnrollmentSubmissionRequest, EnrollmentSuccessResponse,
 };
+use self::subscription_dto::{
+    CreateSubscriptionRequest, SubscriptionListResponse, SubscriptionResponse,
+};
 
 pub mod enrollment_dto;
+pub mod subscription_dto;
 
 const DEFAULT_ADDRESS: &str = "0.0.0.0";
 const DEFAULT_PORT: &str = "8080";
@@ -216,13 +224,12 @@ fn dispatch(request: ParsedRequest, application: &Application) -> Response {
             None => return authentication_rejected(),
         };
         let gate = application.service_request_gate();
-        return match authenticate_governed_request(governed, &gate, unix_time()) {
-            Ok(_) => json_response(
-                "501 Not Implemented",
-                &GovernedErrorResponse::route_not_implemented(),
-            ),
-            Err(response) => response,
+        let admitted = match authenticate_governed_request(governed, &gate, unix_time()) {
+            Ok(admitted) => admitted,
+            Err(response) => return response,
         };
+        let service_id = admitted.verified().service_id();
+        return subscription_route(&request, service_id, application.subscriptions());
     }
 
     if request.path == "/health/ready" {
@@ -296,10 +303,31 @@ impl GovernedErrorResponse {
         }
     }
 
-    const fn route_not_implemented() -> Self {
+    const fn invalid_subscription_request() -> Self {
         Self {
-            code: "route_not_implemented",
-            message: "governed route is not implemented",
+            code: "invalid_subscription_request",
+            message: "subscription request is invalid",
+        }
+    }
+
+    const fn subscription_not_found() -> Self {
+        Self {
+            code: "subscription_not_found",
+            message: "subscription was not found",
+        }
+    }
+
+    const fn subscription_conflict() -> Self {
+        Self {
+            code: "subscription_conflict",
+            message: "subscription already exists in that state",
+        }
+    }
+
+    const fn internal_error() -> Self {
+        Self {
+            code: "internal_error",
+            message: "subscription request could not be completed",
         }
     }
 }
@@ -346,6 +374,136 @@ fn is_supported_governed_method(method: &str, path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
     (path == "/v1/subscriptions" && matches!(method, "GET" | "POST"))
         || (path.starts_with("/v1/subscriptions/") && method == "DELETE")
+}
+
+/// Dispatches an already-authenticated governed request to ILK-010's
+/// subscription operations. `service_id` is the caller's own verified
+/// identity (`VerifiedServiceRequest::service_id`), never taken from the
+/// request body, so a caller can only ever act as itself.
+fn subscription_route<R: SubscriptionRepository>(
+    request: &ParsedRequest,
+    service_id: ActorId,
+    subscriptions: &SubscriptionService<R>,
+) -> Response {
+    let path = request.path.split('?').next().unwrap_or(&request.path);
+    if path == "/v1/subscriptions" {
+        return match request.method.as_str() {
+            "POST" => create_subscription(request, service_id, subscriptions),
+            "GET" => list_subscriptions(&request.path, service_id, subscriptions),
+            _ => text_response("405 Method Not Allowed", "method not allowed\n"),
+        };
+    }
+    match path.strip_prefix("/v1/subscriptions/") {
+        Some(id) => disable_subscription(id, service_id, subscriptions),
+        None => text_response("404 Not Found", "not found\n"),
+    }
+}
+
+fn create_subscription<R: SubscriptionRepository>(
+    request: &ParsedRequest,
+    service_id: ActorId,
+    subscriptions: &SubscriptionService<R>,
+) -> Response {
+    if !request
+        .content_type
+        .as_deref()
+        .is_some_and(is_json_content_type)
+    {
+        return json_response(
+            "415 Unsupported Media Type",
+            &GovernedErrorResponse::invalid_subscription_request(),
+        );
+    }
+    let dto: CreateSubscriptionRequest = match serde_json::from_slice(&request.body) {
+        Ok(dto) => dto,
+        Err(_) => {
+            return json_response(
+                "400 Bad Request",
+                &GovernedErrorResponse::invalid_subscription_request(),
+            );
+        }
+    };
+    let event_type = match dto.event_type() {
+        Ok(event_type) => event_type,
+        Err(error) => return subscription_error_response(&error),
+    };
+    match subscriptions.create(service_id, event_type, unix_time()) {
+        Ok(subscription) => {
+            json_response("201 Created", &SubscriptionResponse::from(&subscription))
+        }
+        Err(error) => subscription_error_response(&error),
+    }
+}
+
+fn list_subscriptions<R: SubscriptionRepository>(
+    path_and_query: &str,
+    service_id: ActorId,
+    subscriptions: &SubscriptionService<R>,
+) -> Response {
+    let active_only = path_and_query
+        .split_once('?')
+        .is_some_and(|(_, query)| query.split('&').any(|pair| pair == "active=true"));
+    let result = if active_only {
+        subscriptions.list_active(service_id)
+    } else {
+        subscriptions.list(service_id)
+    };
+    match result {
+        Ok(values) => json_response(
+            "200 OK",
+            &values
+                .iter()
+                .map(SubscriptionResponse::from)
+                .collect::<SubscriptionListResponse>(),
+        ),
+        Err(error) => subscription_error_response(&error),
+    }
+}
+
+fn disable_subscription<R: SubscriptionRepository>(
+    id: &str,
+    service_id: ActorId,
+    subscriptions: &SubscriptionService<R>,
+) -> Response {
+    let subscription_id: SubscriptionId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return json_response(
+                "400 Bad Request",
+                &GovernedErrorResponse::invalid_subscription_request(),
+            );
+        }
+    };
+    match subscriptions.disable(service_id, subscription_id, unix_time()) {
+        Ok(subscription) => json_response("200 OK", &SubscriptionResponse::from(&subscription)),
+        Err(error) => subscription_error_response(&error),
+    }
+}
+
+fn subscription_error_response(error: &SubscriptionError) -> Response {
+    match error {
+        SubscriptionError::InvalidEventType
+        | SubscriptionError::InvalidSubscriptionId
+        | SubscriptionError::InvalidTimestamp => json_response(
+            "400 Bad Request",
+            &GovernedErrorResponse::invalid_subscription_request(),
+        ),
+        SubscriptionError::NotFound(_) => json_response(
+            "404 Not Found",
+            &GovernedErrorResponse::subscription_not_found(),
+        ),
+        SubscriptionError::AlreadyDisabled(_) | SubscriptionError::DuplicateActive(_, _) => {
+            json_response(
+                "409 Conflict",
+                &GovernedErrorResponse::subscription_conflict(),
+            )
+        }
+        SubscriptionError::UnknownService(_) => authentication_rejected(),
+        SubscriptionError::AlreadyExists(_) | SubscriptionError::Repository(_) => json_response(
+            "503 Service Unavailable",
+            &GovernedErrorResponse::internal_error(),
+        ),
+    }
 }
 
 pub fn enrollment_response<A>(
@@ -790,5 +948,277 @@ mod tests {
             read_request(&mut Cursor::new(request)),
             Err(RequestReadError::Malformed)
         );
+    }
+
+    mod subscription_routes {
+        use std::sync::{Arc, Mutex};
+
+        use super::super::*;
+        use crate::kernel::subscriptions::{EventType, Subscription};
+
+        #[derive(Clone, Default)]
+        struct MemorySubscriptions(Arc<Mutex<Vec<Subscription>>>);
+
+        impl SubscriptionRepository for MemorySubscriptions {
+            fn insert(&self, subscription: Subscription) -> Result<(), SubscriptionError> {
+                let mut values = self.0.lock().unwrap();
+                if values.iter().any(|value| {
+                    value.service_id() == subscription.service_id()
+                        && value.event_type() == subscription.event_type()
+                        && value.is_active()
+                }) {
+                    return Err(SubscriptionError::DuplicateActive(
+                        subscription.service_id(),
+                        subscription.event_type().clone(),
+                    ));
+                }
+                values.push(subscription);
+                Ok(())
+            }
+
+            fn list_for_service(
+                &self,
+                service_id: ActorId,
+            ) -> Result<Vec<Subscription>, SubscriptionError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|value| value.service_id() == service_id)
+                    .cloned()
+                    .collect())
+            }
+
+            fn list_active_for_service(
+                &self,
+                service_id: ActorId,
+            ) -> Result<Vec<Subscription>, SubscriptionError> {
+                Ok(self
+                    .list_for_service(service_id)?
+                    .into_iter()
+                    .filter(Subscription::is_active)
+                    .collect())
+            }
+
+            fn disable(
+                &self,
+                service_id: ActorId,
+                subscription_id: SubscriptionId,
+                disabled_at: i64,
+            ) -> Result<Subscription, SubscriptionError> {
+                let mut values = self.0.lock().unwrap();
+                let value = values
+                    .iter_mut()
+                    .find(|value| value.id() == subscription_id && value.service_id() == service_id)
+                    .ok_or(SubscriptionError::NotFound(subscription_id))?;
+                if !value.is_active() {
+                    return Err(SubscriptionError::AlreadyDisabled(subscription_id));
+                }
+                let disabled = Subscription::restore(
+                    value.id(),
+                    value.service_id(),
+                    value.event_type().clone(),
+                    value.created_at(),
+                    Some(disabled_at),
+                )?;
+                *value = disabled.clone();
+                Ok(disabled)
+            }
+        }
+
+        fn parsed_request(method: &str, path: &str, body: &[u8]) -> ParsedRequest {
+            ParsedRequest {
+                method: method.to_owned(),
+                path: path.to_owned(),
+                authority: Some("kernel.example.test".to_owned()),
+                content_type: Some("application/json".to_owned()),
+                content_digest: None,
+                service_id: None,
+                instance_id: None,
+                request_id: None,
+                signature_input: None,
+                signature: None,
+                body: body.to_vec(),
+            }
+        }
+
+        #[test]
+        fn create_returns_201_with_the_created_subscription() {
+            let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
+            let service_id = ActorId::new();
+            let request = parsed_request(
+                "POST",
+                "/v1/subscriptions",
+                br#"{"event_type":"resource.created.v1"}"#,
+            );
+
+            let response = create_subscription(&request, service_id, &subscriptions);
+
+            assert_eq!(response.status, "201 Created");
+            assert!(response.body.contains("resource.created.v1"));
+            assert!(response.body.contains(&service_id.to_string()));
+        }
+
+        #[test]
+        fn create_rejects_a_non_json_content_type() {
+            let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
+            let mut request = parsed_request("POST", "/v1/subscriptions", b"{}");
+            request.content_type = Some("text/plain".to_owned());
+
+            let response = create_subscription(&request, ActorId::new(), &subscriptions);
+
+            assert_eq!(response.status, "415 Unsupported Media Type");
+        }
+
+        #[test]
+        fn create_rejects_malformed_json() {
+            let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
+            let request = parsed_request("POST", "/v1/subscriptions", b"not json");
+
+            let response = create_subscription(&request, ActorId::new(), &subscriptions);
+
+            assert_eq!(response.status, "400 Bad Request");
+        }
+
+        #[test]
+        fn create_maps_an_invalid_event_type_to_400() {
+            let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
+            let request = parsed_request(
+                "POST",
+                "/v1/subscriptions",
+                br#"{"event_type":"Not Valid"}"#,
+            );
+
+            let response = create_subscription(&request, ActorId::new(), &subscriptions);
+
+            assert_eq!(response.status, "400 Bad Request");
+        }
+
+        #[test]
+        fn create_maps_a_duplicate_active_subscription_to_409() {
+            let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
+            let service_id = ActorId::new();
+            subscriptions
+                .create(
+                    service_id,
+                    EventType::new("resource.created.v1").unwrap(),
+                    1,
+                )
+                .unwrap();
+            let request = parsed_request(
+                "POST",
+                "/v1/subscriptions",
+                br#"{"event_type":"resource.created.v1"}"#,
+            );
+
+            let response = create_subscription(&request, service_id, &subscriptions);
+
+            assert_eq!(response.status, "409 Conflict");
+        }
+
+        #[test]
+        fn list_returns_only_the_callers_own_subscriptions() {
+            let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
+            let owner = ActorId::new();
+            let other = ActorId::new();
+            subscriptions
+                .create(owner, EventType::new("resource.created.v1").unwrap(), 1)
+                .unwrap();
+            subscriptions
+                .create(other, EventType::new("resource.deleted.v1").unwrap(), 1)
+                .unwrap();
+
+            let response = list_subscriptions("/v1/subscriptions", owner, &subscriptions);
+
+            assert_eq!(response.status, "200 OK");
+            assert!(response.body.contains("resource.created.v1"));
+            assert!(!response.body.contains("resource.deleted.v1"));
+        }
+
+        #[test]
+        fn list_with_active_query_parameter_excludes_disabled_subscriptions() {
+            let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
+            let owner = ActorId::new();
+            let created = subscriptions
+                .create(owner, EventType::new("resource.created.v1").unwrap(), 1)
+                .unwrap();
+            subscriptions.disable(owner, created.id(), 2).unwrap();
+
+            let all = list_subscriptions("/v1/subscriptions", owner, &subscriptions);
+            let active_only =
+                list_subscriptions("/v1/subscriptions?active=true", owner, &subscriptions);
+
+            assert!(all.body.contains("resource.created.v1"));
+            assert_eq!(
+                active_only.body,
+                r#"{"subscriptions":[]}"#.to_owned() + "\n"
+            );
+        }
+
+        #[test]
+        fn disable_returns_the_disabled_subscription() {
+            let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
+            let owner = ActorId::new();
+            let created = subscriptions
+                .create(owner, EventType::new("resource.created.v1").unwrap(), 1)
+                .unwrap();
+
+            let response = disable_subscription(&created.id().to_string(), owner, &subscriptions);
+
+            assert_eq!(response.status, "200 OK");
+            assert!(response.body.contains("\"active\":false"));
+        }
+
+        #[test]
+        fn disable_rejects_a_malformed_subscription_id() {
+            let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
+
+            let response = disable_subscription("not-a-uuid", ActorId::new(), &subscriptions);
+
+            assert_eq!(response.status, "400 Bad Request");
+        }
+
+        #[test]
+        fn disable_hides_another_services_subscription_as_not_found() {
+            let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
+            let owner = ActorId::new();
+            let stranger = ActorId::new();
+            let created = subscriptions
+                .create(owner, EventType::new("resource.created.v1").unwrap(), 1)
+                .unwrap();
+
+            let response =
+                disable_subscription(&created.id().to_string(), stranger, &subscriptions);
+
+            assert_eq!(response.status, "404 Not Found");
+        }
+
+        #[test]
+        fn route_dispatches_by_method_and_path() {
+            let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
+            let owner = ActorId::new();
+            let create_request = parsed_request(
+                "POST",
+                "/v1/subscriptions",
+                br#"{"event_type":"resource.created.v1"}"#,
+            );
+
+            let created = subscription_route(&create_request, owner, &subscriptions);
+            assert_eq!(created.status, "201 Created");
+
+            let list_request = parsed_request("GET", "/v1/subscriptions", b"");
+            let listed = subscription_route(&list_request, owner, &subscriptions);
+            assert_eq!(listed.status, "200 OK");
+
+            let subscription_id = subscriptions.list(owner).unwrap()[0].id();
+            let delete_request = parsed_request(
+                "DELETE",
+                &format!("/v1/subscriptions/{subscription_id}"),
+                b"",
+            );
+            let disabled = subscription_route(&delete_request, owner, &subscriptions);
+            assert_eq!(disabled.status, "200 OK");
+        }
     }
 }
