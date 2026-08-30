@@ -22,6 +22,10 @@ const FIND_BY_MATCH_KEY_SQL: &str = "SELECT route_id::text, source_service_id::t
         request_id::text, subscription_id::text, destination_service_id::text, created_at \
     FROM request_routes \
     WHERE request_id = $1::text::uuid AND subscription_id = $2::text::uuid";
+const FIND_BY_ID_SQL: &str = "SELECT route_id::text, source_service_id::text, \
+        request_id::text, subscription_id::text, destination_service_id::text, created_at \
+    FROM request_routes \
+    WHERE route_id = $1::text::uuid";
 const LIST_FOR_REQUEST_SQL: &str = "SELECT route_id::text, source_service_id::text, \
         request_id::text, subscription_id::text, destination_service_id::text, created_at \
     FROM request_routes \
@@ -83,6 +87,16 @@ impl RouteRepository for PostgresRouteRepository {
                 )
             })?;
         route_from_row(&existing)
+    }
+
+    fn find(&self, route_id: RouteId) -> Result<Option<Route>, RequestError> {
+        let mut connection = self.database.connection().map_err(repository_error)?;
+        connection
+            .query_opt(FIND_BY_ID_SQL, &[&route_id.to_string()])
+            .map_err(repository_error)?
+            .as_ref()
+            .map(route_from_row)
+            .transpose()
     }
 
     fn list_for_request(&self, request_id: RequestId) -> Result<Vec<Route>, RequestError> {

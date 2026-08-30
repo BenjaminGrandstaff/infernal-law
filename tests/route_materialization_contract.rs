@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use infernal_law::kernel::identity::ActorId;
 use infernal_law::kernel::requests::{
-    RequestError, RequestId, Route, RouteRepository, RouteService,
+    RequestError, RequestId, Route, RouteId, RouteRepository, RouteService,
 };
 use infernal_law::kernel::subscriptions::SubscriptionId;
 
@@ -24,6 +24,16 @@ impl RouteRepository for MemoryRoutes {
         }
         routes.push(route.clone());
         Ok(route)
+    }
+
+    fn find(&self, route_id: RouteId) -> Result<Option<Route>, RequestError> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|route| route.id() == route_id)
+            .cloned())
     }
 
     fn list_for_request(&self, request_id: RequestId) -> Result<Vec<Route>, RequestError> {
@@ -140,4 +150,21 @@ fn listing_by_destination_returns_only_that_destinations_routes() {
 
     let listed = routes.list_for_destination(destination).unwrap();
     assert_eq!(listed, vec![route]);
+}
+
+#[test]
+fn find_returns_a_single_route_by_id_or_none_for_an_unknown_id() {
+    let routes = RouteService::new(MemoryRoutes::default());
+    let route = routes
+        .materialize(
+            ActorId::new(),
+            RequestId::new(),
+            SubscriptionId::new(),
+            ActorId::new(),
+            10,
+        )
+        .unwrap();
+
+    assert_eq!(routes.find(route.id()).unwrap(), Some(route));
+    assert_eq!(routes.find(RouteId::new()).unwrap(), None);
 }

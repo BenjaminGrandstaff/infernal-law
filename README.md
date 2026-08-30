@@ -71,6 +71,14 @@ It listens on `0.0.0.0:8080` by default and provides:
   own identity, never a request parameter, so this exposes no other
   service's routes; it requires no separate ILK-002 authority decision,
   the same as any other read of the caller's own data.
+- `GET /v1/routes/{route_id}/request` — resolves the Request behind a
+  route, for that route's own destination service only. `GET
+  /v1/requests/{id}` is scoped to a request's *source* service, so
+  without this route a worker that claims a route has no way to learn
+  its action, scope, or schema versions — the piece it actually needs to
+  do the work. Fails `404` if the route does not exist or is not assigned
+  to the caller (indistinguishable, same convention as claiming), and
+  `400` for a malformed route ID.
 - `POST /v1/routes/{route_id}/claims` — ILK-011 work-claim creation
   (`{"lease_seconds": <i64>}`). The worker's identity is always the caller's
   own verified service and instance, never a body field. Fails `404` if the

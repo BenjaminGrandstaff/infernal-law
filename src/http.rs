@@ -29,8 +29,8 @@ use crate::kernel::request_gate::{
     AdmittedServiceRequest, ServiceRequestGate, ServiceRequestGateError,
 };
 use crate::kernel::requests::{
-    ActionName, RequestAcceptance, RequestError, RequestId, RequestRepository, RequestService,
-    Route, RouteId, RouteRepository, RouteService,
+    AcceptedRequest, ActionName, RequestAcceptance, RequestError, RequestId, RequestRepository,
+    RequestService, Route, RouteId, RouteRepository, RouteService,
 };
 use crate::kernel::service_requests::{
     ServiceRequestAuthenticationError, ServiceRequestParts, SignedServiceRequest,
@@ -359,6 +359,48 @@ where
     }
 }
 
+/// Resolves the Request behind a materialized route, but only for the
+/// route's own destination service -- the worker that claimed it, or
+/// could claim it. A route alone names a request ID; until this
+/// composition existed, nothing let the destination service actually read
+/// what that request asked for (`GET /v1/requests/{id}` is intentionally
+/// scoped to the request's *source* service only). Composes ILK-003's own
+/// route and request lookups without either depending on the other's
+/// repository, the same compositional style as `EligibleRouteQuery` and
+/// `SubscriptionRouter`. A route that does not exist, or is not assigned
+/// to the caller, is indistinguishable from a request that does not
+/// exist -- the same ownership-hiding convention used everywhere else in
+/// this module.
+struct RoutedRequestQuery<'a, RR, RQ> {
+    routes: &'a RouteService<RR>,
+    requests: &'a RequestService<RQ>,
+}
+
+impl<'a, RR, RQ> RoutedRequestQuery<'a, RR, RQ> {
+    const fn new(routes: &'a RouteService<RR>, requests: &'a RequestService<RQ>) -> Self {
+        Self { routes, requests }
+    }
+}
+
+impl<RR, RQ> RoutedRequestQuery<'_, RR, RQ>
+where
+    RR: RouteRepository,
+    RQ: RequestRepository,
+{
+    fn find_for_destination(
+        &self,
+        caller: ActorId,
+        route_id: RouteId,
+    ) -> Result<Option<AcceptedRequest>, RequestError> {
+        let route = match self.routes.find(route_id)? {
+            Some(route) if route.destination_service() == caller => route,
+            _ => return Ok(None),
+        };
+        self.requests
+            .find(route.source_service(), route.request_id())
+    }
+}
+
 pub fn serve(application: Application) -> std::io::Result<()> {
     let address = env::var("BIND_ADDRESS").unwrap_or_else(|_| DEFAULT_ADDRESS.to_owned());
     let port = env::var("PORT").unwrap_or_else(|_| DEFAULT_PORT.to_owned());
@@ -457,6 +499,17 @@ fn dispatch(request: ParsedRequest, application: &Application) -> Response {
                 verified.instance_id(),
                 route_id,
                 application.work_claims(),
+            );
+        }
+        if let Some(route_id) = path
+            .strip_prefix("/v1/routes/")
+            .and_then(|rest| rest.strip_suffix("/request"))
+        {
+            return find_routed_request(
+                route_id,
+                service_id,
+                application.routes(),
+                application.requests(),
             );
         }
         if let Some(rest) = path.strip_prefix("/v1/claims/") {
@@ -635,6 +688,13 @@ impl GovernedErrorResponse {
         }
     }
 
+    const fn invalid_route_id() -> Self {
+        Self {
+            code: "invalid_route_id",
+            message: "route ID must be a UUID",
+        }
+    }
+
     const fn request_not_authorized() -> Self {
         Self {
             code: "request_not_authorized",
@@ -713,6 +773,7 @@ fn is_governed_route(path: &str) -> bool {
         || path.starts_with("/v1/requests/")
         || path == "/v1/routes/eligible"
         || (path.starts_with("/v1/routes/") && path.ends_with("/claims"))
+        || (path.starts_with("/v1/routes/") && path.ends_with("/request"))
         || is_claim_action_path(path)
 }
 
@@ -725,6 +786,7 @@ fn is_supported_governed_method(method: &str, path: &str) -> bool {
         || (path.starts_with("/v1/requests/") && method == "GET")
         || (path == "/v1/routes/eligible" && method == "GET")
         || (path.starts_with("/v1/routes/") && path.ends_with("/claims") && method == "POST")
+        || (path.starts_with("/v1/routes/") && path.ends_with("/request") && method == "GET")
         || (is_claim_action_path(path) && method == "POST")
 }
 
@@ -1183,6 +1245,36 @@ fn list_eligible_routes<RR: RouteRepository, WR: WorkClaimRepository>(
                 .map(RouteResponse::from)
                 .collect::<EligibleRouteListResponse>(),
         ),
+        Err(error) => request_error_response(&error),
+    }
+}
+
+/// Resolves the Request behind `route_id` for the caller's own verified
+/// identity -- the piece a worker needs to actually perform the work it
+/// claimed (or is about to claim). Only the route's own destination
+/// service may read it; a route belonging to another service, or that
+/// does not exist, is indistinguishable to the caller. No separate
+/// ILK-002 authority decision gates this, matching every other read
+/// gated by route ownership rather than a fresh policy call.
+fn find_routed_request<RR: RouteRepository, RQ: RequestRepository>(
+    route_id: &str,
+    service_id: ActorId,
+    routes: &RouteService<RR>,
+    requests: &RequestService<RQ>,
+) -> Response {
+    let route_id: RouteId = match route_id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return json_response(
+                "400 Bad Request",
+                &GovernedErrorResponse::invalid_route_id(),
+            );
+        }
+    };
+    let query = RoutedRequestQuery::new(routes, requests);
+    match query.find_for_destination(service_id, route_id) {
+        Ok(Some(record)) => json_response("200 OK", &AcceptedRequestResponse::from(&record)),
+        Ok(None) => json_response("404 Not Found", &GovernedErrorResponse::claim_not_found()),
         Err(error) => request_error_response(&error),
     }
 }
@@ -2966,6 +3058,16 @@ mod tests {
                 Ok(route)
             }
 
+            fn find(&self, route_id: RouteId) -> Result<Option<Route>, RequestError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|route| route.id() == route_id)
+                    .cloned())
+            }
+
             fn list_for_request(&self, request_id: RequestId) -> Result<Vec<Route>, RequestError> {
                 Ok(self
                     .0
@@ -3587,6 +3689,16 @@ mod tests {
                 Ok(route)
             }
 
+            fn find(&self, route_id: RouteId) -> Result<Option<Route>, RequestError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|route| route.id() == route_id)
+                    .cloned())
+            }
+
             fn list_for_request(&self, request_id: RequestId) -> Result<Vec<Route>, RequestError> {
                 Ok(self
                     .0
@@ -3767,6 +3879,197 @@ mod tests {
 
             assert_eq!(response.status, "200 OK");
             assert!(!response.body.contains(&other_route.id().to_string()));
+        }
+    }
+
+    mod routed_request_routes {
+        use std::sync::{Arc, Mutex};
+
+        use super::super::*;
+        use crate::kernel::authority::{Scope, no_artifact_schema_versions};
+        use crate::kernel::requests::{AcceptedRequest, Request, RequestFingerprint};
+        use crate::kernel::subscriptions::SubscriptionId;
+
+        #[derive(Clone, Default)]
+        struct MemoryRoutes(Arc<Mutex<Vec<Route>>>);
+
+        impl MemoryRoutes {
+            fn seed(&self, route: Route) {
+                self.0.lock().unwrap().push(route);
+            }
+        }
+
+        impl RouteRepository for MemoryRoutes {
+            fn materialize(&self, route: Route) -> Result<Route, RequestError> {
+                self.0.lock().unwrap().push(route.clone());
+                Ok(route)
+            }
+
+            fn find(&self, route_id: RouteId) -> Result<Option<Route>, RequestError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|route| route.id() == route_id)
+                    .cloned())
+            }
+
+            fn list_for_request(&self, request_id: RequestId) -> Result<Vec<Route>, RequestError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|route| route.request_id() == request_id)
+                    .cloned()
+                    .collect())
+            }
+
+            fn list_for_destination(
+                &self,
+                destination_service: ActorId,
+            ) -> Result<Vec<Route>, RequestError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|route| route.destination_service() == destination_service)
+                    .cloned()
+                    .collect())
+            }
+        }
+
+        #[derive(Clone, Default)]
+        struct MemoryRequests(Arc<Mutex<Vec<AcceptedRequest>>>);
+
+        impl MemoryRequests {
+            fn seed(&self, record: AcceptedRequest) {
+                self.0.lock().unwrap().push(record);
+            }
+        }
+
+        impl RequestRepository for MemoryRequests {
+            fn accept(
+                &self,
+                request: Request,
+                fingerprint: RequestFingerprint,
+            ) -> Result<RequestAcceptance, RequestError> {
+                let record = AcceptedRequest::restore(request, fingerprint, 0)?;
+                self.0.lock().unwrap().push(record.clone());
+                Ok(RequestAcceptance::Accepted(record))
+            }
+
+            fn find(
+                &self,
+                source_service: ActorId,
+                request_id: RequestId,
+            ) -> Result<Option<AcceptedRequest>, RequestError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|record| {
+                        record.request().source_service() == source_service
+                            && record.request().id() == request_id
+                    })
+                    .cloned())
+            }
+        }
+
+        fn accepted_request(source: ActorId, request_id: RequestId) -> AcceptedRequest {
+            let request = Request::restore(
+                request_id,
+                source,
+                "billing.invoice.submit",
+                Scope::wildcard(),
+                no_artifact_schema_versions(),
+            )
+            .unwrap();
+            let fingerprint = request.fingerprint();
+            AcceptedRequest::restore(request, fingerprint, 0).unwrap()
+        }
+
+        #[test]
+        fn returns_the_request_for_the_routes_own_destination() {
+            let source = ActorId::new();
+            let destination = ActorId::new();
+            let request_id = RequestId::new();
+            let route =
+                Route::create(source, request_id, SubscriptionId::new(), destination, 1).unwrap();
+            let routes = MemoryRoutes::default();
+            routes.seed(route.clone());
+            let requests = MemoryRequests::default();
+            requests.seed(accepted_request(source, request_id));
+            let route_service = RouteService::new(routes);
+            let request_service = RequestService::new(requests);
+
+            let response = find_routed_request(
+                &route.id().to_string(),
+                destination,
+                &route_service,
+                &request_service,
+            );
+
+            assert_eq!(response.status, "200 OK");
+            assert!(response.body.contains("billing.invoice.submit"));
+            assert!(response.body.contains(&request_id.to_string()));
+        }
+
+        #[test]
+        fn hides_a_route_owned_by_another_service_as_not_found() {
+            let source = ActorId::new();
+            let destination = ActorId::new();
+            let request_id = RequestId::new();
+            let route =
+                Route::create(source, request_id, SubscriptionId::new(), destination, 1).unwrap();
+            let routes = MemoryRoutes::default();
+            routes.seed(route.clone());
+            let requests = MemoryRequests::default();
+            requests.seed(accepted_request(source, request_id));
+            let route_service = RouteService::new(routes);
+            let request_service = RequestService::new(requests);
+
+            let response = find_routed_request(
+                &route.id().to_string(),
+                ActorId::new(),
+                &route_service,
+                &request_service,
+            );
+
+            assert_eq!(response.status, "404 Not Found");
+        }
+
+        #[test]
+        fn hides_a_nonexistent_route_as_not_found() {
+            let route_service = RouteService::new(MemoryRoutes::default());
+            let request_service = RequestService::new(MemoryRequests::default());
+
+            let response = find_routed_request(
+                &RouteId::new().to_string(),
+                ActorId::new(),
+                &route_service,
+                &request_service,
+            );
+
+            assert_eq!(response.status, "404 Not Found");
+        }
+
+        #[test]
+        fn rejects_a_malformed_route_id() {
+            let route_service = RouteService::new(MemoryRoutes::default());
+            let request_service = RequestService::new(MemoryRequests::default());
+
+            let response = find_routed_request(
+                "not-a-uuid",
+                ActorId::new(),
+                &route_service,
+                &request_service,
+            );
+
+            assert_eq!(response.status, "400 Bad Request");
         }
     }
 }

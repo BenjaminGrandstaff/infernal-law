@@ -356,6 +356,8 @@ pub trait RouteRepository: Send + Sync {
     /// repeated matching scans, subscription wakeups, and retries safe.
     fn materialize(&self, route: Route) -> Result<Route, RequestError>;
 
+    fn find(&self, route_id: RouteId) -> Result<Option<Route>, RequestError>;
+
     fn list_for_request(&self, request_id: RequestId) -> Result<Vec<Route>, RequestError>;
 
     /// Lists every route currently materialized for `destination_service`,
@@ -396,6 +398,10 @@ where
             now,
         )?;
         self.repository.materialize(route)
+    }
+
+    pub fn find(&self, route_id: RouteId) -> Result<Option<Route>, RequestError> {
+        self.repository.find(route_id)
     }
 
     pub fn list_for_request(&self, request_id: RequestId) -> Result<Vec<Route>, RequestError> {

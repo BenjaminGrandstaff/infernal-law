@@ -8,7 +8,7 @@ use infernal_law::kernel::authority::{
     ContentDigest, SchemaKind, SchemaName, SchemaRepository, SchemaVersionRefs, Scope,
 };
 use infernal_law::kernel::identity::{ActorId, ActorKind};
-use infernal_law::kernel::requests::Request;
+use infernal_law::kernel::requests::{Request, RouteId};
 use infernal_law::kernel::subscriptions::{DeliveryMode, EventType};
 use infernal_law::wiring::Application;
 use r2d2_postgres::postgres::{Client, NoTls};
@@ -124,6 +124,32 @@ fn route_materialization_is_idempotent_and_survives_reconnection() {
         .list_for_destination(destination.id())
         .unwrap();
     assert_eq!(by_destination, vec![first_route.clone()]);
+
+    let found = second_process
+        .routes()
+        .find(first_route.id())
+        .unwrap()
+        .expect("the route should be findable by ID");
+    assert_eq!(found, first_route);
+    assert!(
+        second_process
+            .routes()
+            .find(RouteId::new())
+            .unwrap()
+            .is_none()
+    );
+
+    // The route's own destination can resolve the request it names --
+    // the mechanism that closes the "worker receives governed work" gap.
+    let routed_request = second_process
+        .requests()
+        .find(found.source_service(), found.request_id())
+        .unwrap()
+        .expect("the destination should be able to read the request behind its route");
+    assert_eq!(
+        routed_request.request().action().as_str(),
+        "test.route-materialization.v1"
+    );
 
     assert_database_guards(request_id, first_route.id());
 }

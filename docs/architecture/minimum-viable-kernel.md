@@ -338,23 +338,25 @@ it:
 | 10. External scheduler can query eligible routes | `GET /v1/routes/eligible` → `EligibleRouteQuery` | `tests/route_materialization_contract.rs`, `tests/work_claim_contract.rs`, colocated `eligible_route_routes` tests in `src/http.rs`, `tests/postgres_route_repository.rs`/`tests/postgres_work_claim_repository.rs` (ignored, live-DB) |
 | 11. Scheduler proposes a route/worker assignment | `POST /v1/routes/{route_id}/claims` | `tests/work_claim_contract.rs`, colocated `work_claim_routes` HTTP tests in `src/http.rs` |
 | 12. Kernel atomically arbitrates ownership (claims/leases/fencing) | `WorkClaimService::claim` | `tests/work_claim_contract.rs`, `tests/postgres_work_claim_repository.rs` (ignored, live-DB) |
-| 13. Worker receives the governed work through the kernel | **Gap — see below** | — |
+| 13. Worker receives the governed work through the kernel | `GET /v1/routes/{route_id}/request` → `RoutedRequestQuery` | `tests/route_materialization_contract.rs::find_returns_a_single_route_by_id_or_none_for_an_unknown_id`, colocated `routed_request_routes` tests in `src/http.rs`, `tests/postgres_route_repository.rs` (ignored, live-DB) |
 | 14. Worker returns completion/result state through the kernel | `POST /v1/claims/{id}/complete` | `tests/work_claim_contract.rs::completion_is_terminal_and_cannot_be_renewed_or_released_afterward` |
 | 15. Required evidence remains durable across restart | `protect_work_claim()` trigger + append-only tables | `tests/postgres_work_claim_repository.rs`'s `assert_database_guards`; see [Section 6](#6-mvp-failurerecovery-acceptance-tests) for the full-restart proof |
 
-**Step 13 is a real, currently open gap**, not yet reflected anywhere else
-in this document before this pass: a claimed route's `WorkClaimResponse`
-carries `claim_id`, `route_id`, `worker_service_id`, `worker_instance_id`,
-`fencing_token`, `status`, `claimed_at`, and `lease_expires_at` — never the
-original Request's action, scope, or schema. The eligible-route listing
-(`RouteResponse`) adds `request_id`, but the only Request-read contract,
-`GET /v1/requests/{id}`, is scoped to the request's *source* service
-(`RequestRepository::find(source_service, request_id)`); a destination
-service calling it gets an indistinguishable 404. **A worker that
-successfully claims a route today has no kernel-mediated way to learn what
-it was asked to do.** This blocks the vertical slice from being a genuinely
-complete loop, even though every step around it (claim, complete, fencing)
-is independently proven. See [Section 7](#7-current-mvp-implementation-status).
+**Step 13 was a real gap, now closed.** A claimed route's
+`WorkClaimResponse` still carries only `claim_id`, `route_id`,
+`worker_service_id`, `worker_instance_id`, `fencing_token`, `status`,
+`claimed_at`, and `lease_expires_at` — never the original Request's
+action, scope, or schema — and `GET /v1/requests/{id}` is still
+intentionally scoped to the request's *source* service only
+(`RequestRepository::find(source_service, request_id)`). What closes the
+gap is a new, separate read: `GET /v1/routes/{route_id}/request`
+(`RoutedRequestQuery`, composing `RouteService::find` with
+`RequestService::find`) resolves a route to the request behind it, but
+only for the route's own destination service — the worker that claimed
+it, or could claim it. A route belonging to another service, or that does
+not exist, is indistinguishable to the caller, matching every other
+ownership-hiding convention in this document. See ILK-003's own status
+below and [Section 7](#7-current-mvp-implementation-status).
 
 ## 5. MVP capabilities
 
@@ -368,7 +370,7 @@ is deferred — its full text lives in
 | --- | --- | --- |
 | ILK-001 | Identity | **MVP Kernel** |
 | ILK-002 | Authority | **Split** — request-acceptance authority is MVP; per-route re-authorization and schema-lifecycle administration UI are Kernel 1.0 |
-| ILK-003 | Requests | **Split** — immutable durable requests and inclusive-only route materialization are MVP; a destination-scoped read of request content is an **open MVP gap** (Section 4, step 13); correlation, exclusive groups, route history, and backlog matching are Kernel 1.0 |
+| ILK-003 | Requests | **Split** — immutable durable requests, inclusive-only route materialization, and a destination-scoped read of request content are MVP (all done); correlation, exclusive groups, route history, and backlog matching are Kernel 1.0 |
 | ILK-004 | Versions | **MVP Kernel** (the append-only/immutability invariant itself; administrative lifecycle workflow is external — see ILK-002) |
 | ILK-005 | Relationships | **Future Kernel** — unimplemented, not required by the vertical slice |
 | ILK-006 | Artifacts | **Future Kernel** + domain-owned by default — unimplemented, not required by the vertical slice; see [Section 11](#11-namespace-data-and-search-ownership) |
@@ -671,17 +673,11 @@ Implementation status:
 **Scope: Split.**
 
 **MVP**: the immutable, durable request itself, idempotent acceptance under
-retry, rejection of ID reuse for different content, and idempotent
-materialization of inclusive routes for actively-matching subscriptions.
-
-**Open MVP gap** (identified in [Section 4](#4-mvp-vertical-slice), step
-13): there is no destination-scoped read of an accepted request. `find` is
-scoped to `(source_service, request_id)` only
-(`RequestRepository::find`/`PostgresRequestRepository`'s `FIND_SQL`); a
-route's destination service — the worker that just claimed the route — has
-no kernel-mediated way to read the action, scope, or schema of the request
-it was routed to handle. This is required for the vertical slice to be a
-genuinely complete loop, not merely a Kernel 1.0 enhancement.
+retry, rejection of ID reuse for different content, idempotent
+materialization of inclusive routes for actively-matching subscriptions,
+and a destination-scoped read of the request behind a route (all Complete
+— the last of these closed a real MVP gap; see the implementation status
+below).
 
 **Kernel 1.0**: correlation/causation relationships (full realization is
 [ILK-005](#ilk-005-relationships)), exclusive-group routes and
@@ -729,9 +725,10 @@ Invariants:
 - **MVP** — A source MUST NOT receive destination discovery information.
   The kernel owns subscriber discovery, instance selection, handshake, and
   delivery.
-- **Open MVP gap** — The route's own destination service MUST be able to
-  read enough of the request (action, scope, schema references) to
-  actually perform the work it claimed. Not yet implemented — see above.
+- **MVP** — The route's own destination service MUST be able to read
+  enough of the request (action, scope, schema references) to actually
+  perform the work it claimed, without gaining any broader ability to
+  read requests it is not the destination of.
 - **MVP** — Request acceptance MUST NOT imply authorization, delivery,
   work completion, or acceptance of the artifact by the destination
   service.
@@ -748,8 +745,10 @@ Acceptance criteria:
   artifact digest, or payload is rejected deterministically. **MVP.**
 - The kernel can route a previously accepted request without interpreting
   its service-specific artifact content. **MVP.**
-- A route's destination service can read the request it was routed for.
-  **Open MVP gap** — not yet implemented.
+- A route's destination service can read the request it was routed for,
+  and no other service's requests. **MVP** — proven
+  (`returns_the_request_for_the_routes_own_destination`,
+  `hides_a_route_owned_by_another_service_as_not_found`).
 - A request accepted before its matching subscription exists becomes
   eligible for delivery after that subscription is committed, without
   source resubmission. **Kernel 1.0** (backlog matching — not implemented;
@@ -800,9 +799,7 @@ Implementation status:
   request's own action, scope, and schema versions.
 - Complete: `GET /v1/requests/{id}` reads back only the caller's own
   accepted request when the caller is the *source* — another service's
-  request looks identical to one that does not exist. **This is also the
-  open MVP gap above**: the same guarantee does not yet exist for a
-  request's *destination* service.
+  request looks identical to one that does not exist.
 - Complete (first slice — this is the MVP-required piece): `Route`,
   `RouteRepository`, and `RouteService` (`src/kernel/requests.rs`) — an
   accepted request's independent, idempotently-materialized destinations,
@@ -810,10 +807,21 @@ Implementation status:
   state, transition history, or work claim exists on a route itself — it
   records only that a destination is eligible; a route's own claim history
   (ILK-011) is what currently stands in for transition evidence.
-- Pending (MVP, not Kernel 1.0): a destination-scoped request read, or
-  equivalent content delivered through the route/claim response, so a
-  worker that claims a route can learn what to do. See
-  [Section 7](#7-current-mvp-implementation-status).
+- Complete: `RouteRepository::find` (a single route lookup by ID) plus
+  `GET /v1/routes/{route_id}/request` (`RoutedRequestQuery` in
+  `src/http.rs`, composing `RouteService::find` with
+  `RequestService::find`) — this is what closes the "worker receives
+  governed work" gap this document's previous revision identified.
+  `RoutedRequestQuery` resolves a route to the request behind it only for
+  the route's own destination service; a route belonging to another
+  service, or that does not exist, is indistinguishable to the caller, the
+  same convention used for claiming. No separate ILK-002 authority
+  decision gates it, matching every other read gated by structural route
+  ownership. Proven at the domain level
+  (`tests/route_materialization_contract.rs::find_returns_a_single_route_by_id_or_none_for_an_unknown_id`),
+  at the HTTP level (colocated `routed_request_routes` tests in
+  `src/http.rs`), and against live PostgreSQL
+  (`tests/postgres_route_repository.rs`).
 - Kernel 1.0: correlation relationships, exclusive-group routes and their
   consumer-group semantics, route transition history, and
   subscription-triggered backlog routing (a subscription committed after a
@@ -1236,9 +1244,10 @@ Implementation status:
   `tests/postgres_work_claim_repository.rs`) and at the HTTP level
   (colocated `eligible_route_routes` tests in `src/http.rs`), including
   that a route with an expired claim becomes eligible again and that a
-  caller never sees another service's routes. **This query tells a
-  scheduler/worker *that* a route exists to claim, not *what* the request
-  behind it is** — that remaining gap belongs to ILK-003 (see above).
+  caller never sees another service's routes. This query tells a
+  scheduler/worker *that* a route exists to claim; ILK-003's
+  `GET /v1/routes/{route_id}/request` (see above) tells the worker *what*
+  the request behind it is, closing what was previously an open gap.
 - Kernel 1.0: administrator-authorized forced claim revocation;
   route-revision/assignment-ID distinctness (currently conflated with the
   fencing token as a deliberate simplification).
@@ -1346,7 +1355,8 @@ content mediation, or events.
 
 Everything tagged **MVP Kernel — Complete** in Section 5 requires no
 further work for `v0.1.0`: ILK-001 (Identity), ILK-002's request-acceptance
-authority, ILK-003's immutable requests and inclusive route materialization,
+authority, ILK-003's immutable requests, inclusive route materialization,
+and destination-scoped request read (`GET /v1/routes/{route_id}/request`),
 ILK-004, ILK-007's authority-decision evidence, ILK-008's per-capability
 audit, ILK-010's inclusive subscriptions, and ILK-011's claim/renew/
 release/complete with fencing *and* the eligible-route query
@@ -1354,26 +1364,19 @@ release/complete with fencing *and* the eligible-route query
 
 What remains before tagging `v0.1.0`:
 
-1. **Expose the request content a claimed route refers to.** This is the
-   one missing piece of "receive" in receive → execute → complete
-   ([Section 4](#4-mvp-vertical-slice), step 13): `GET /v1/requests/{id}`
-   is scoped to the request's source service only, and neither
-   `RouteResponse` nor `WorkClaimResponse` carries the request's action,
-   scope, or schema. Without this, a worker that successfully claims a
-   route still has nothing to execute.
-2. **Wire a simple external Taskmaster against the eligible-route query**
+1. **Wire a simple external Taskmaster against the eligible-route query**
    — `infernal-taskmaster-simple` is currently an eight-line stub; it needs
    enough logic to call `GET /v1/routes/eligible` and propose a claim.
-3. **Wire a simple worker through claim → execution → completion** — using
-   the existing `POST /v1/routes/{route_id}/claims` and
-   `POST /v1/claims/{id}/complete` routes (already MVP-complete) plus
-   whatever closes gap 1 above.
-4. **Close any remaining transaction/idempotency gaps exposed by that
+2. **Wire a simple worker through claim → execution → completion** — using
+   the existing `POST /v1/routes/{route_id}/claims`,
+   `GET /v1/routes/{route_id}/request`, and `POST /v1/claims/{id}/complete`
+   routes, all already MVP-complete.
+3. **Close any remaining transaction/idempotency gaps exposed by that
    end-to-end path** — the individual pieces (acceptance, materialization,
-   eligible-route query, claim, completion) are each already transactional
-   or a plain read of already-committed state; this step is about
-   confirming that, end-to-end, once gap 1 is closed.
-5. **Run the required retry, denial, crash/recovery, concurrency, and
+   eligible-route query, claim, routed-request read, completion) are each
+   already transactional or a plain read of already-committed state; this
+   step is about confirming that, end-to-end.
+4. **Run the required retry, denial, crash/recovery, concurrency, and
    fencing tests** ([Section 6](#6-mvp-failurerecovery-acceptance-tests))
    as one continuous scenario, including the restart proof that today only
    exists per-capability.
@@ -1402,9 +1405,7 @@ Cross-referenced (see Section 5 for full invariants/acceptance criteria):
   wiring is deferred); administrator-facing schema-activation workflow.
 - **ILK-003** — exclusive-group routes and consumer-group semantics;
   append-only route transition history; backlog matching (a subscription
-  created after a request does not yet retroactively see it). (A
-  destination-scoped read of request content is an **MVP** gap, not
-  Kernel 1.0 — see Section 7.)
+  created after a request does not yet retroactively see it).
 - **ILK-007** — a generalized `Decision` record type spanning routing,
   pause, and assignment decisions uniformly, rather than relying on each
   capability's own append-only table.
@@ -1861,7 +1862,7 @@ policy moved outside the kernel, and a stateless external evaluator,
 respectively) and remain fully consistent with it.
 
 The requirements intentionally do not choose most of these implementation
-details. One is resolved: the eligible-route query's minimum shape
+details. Two are resolved. The eligible-route query's minimum shape
 (ADR-0011) is now `GET /v1/routes/eligible`, scoped to the caller's own
 verified destination identity, with no pagination and no separate
 worker-class declaration (a route's own destination *is* the worker class
@@ -1870,12 +1871,14 @@ that unblocks Taskmaster, not a general one. Generalizing it (pagination,
 an explicit worker-class/capability declaration distinct from destination
 identity, and freshness/staleness semantics beyond a plain committed read)
 is Kernel 1.0, tracked alongside exclusive consumer groups in Section 8.
-The remaining open decisions:
+How a claimed route's worker learns the request's content is also
+resolved: a separate destination-scoped read,
+`GET /v1/routes/{route_id}/request`, rather than embedding request
+content in the claim/route response — this keeps `WorkClaimResponse` and
+`RouteResponse` about claim/route state only, and reuses
+`AcceptedRequestResponse` as-is rather than inventing a second request
+wire format. The remaining open decisions:
 
-- how a claimed route's worker learns the request's content — a
-  destination-scoped request read, fields embedded directly in the
-  claim/route response, or something else (this is an **MVP** decision,
-  not deferred — see Section 7);
 - service-owned artifact-schema and permission-policy-schema formats;
 - constrained policy evaluation language and scope matching rules;
 - schema publication, administrator approval, and revocation workflow;
@@ -1893,12 +1896,10 @@ the affected `ILK-*` requirements.
 
 ### Remaining work before `v0.1.0 — Minimum Viable Kernel`
 
-- Expose the request content (action/scope/schema) a claimed route refers
-  to, so a worker actually has something to execute — the one missing
-  piece of the receive → execute → complete path.
 - Wire `infernal-taskmaster-simple` to query eligible routes and propose
   claims.
-- Wire one simple worker through receive → execute → complete.
+- Wire one simple worker through receive → execute → complete, using the
+  now-complete `GET /v1/routes/{route_id}/request` to receive.
 - Confirm required request/route/claim/completion/audit state is durably
   recorded across that end-to-end path (already true per-capability; this
   is an end-to-end confirmation, not new invariants).
