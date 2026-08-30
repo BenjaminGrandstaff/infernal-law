@@ -1362,7 +1362,7 @@ The MVP MUST prove:
 | Concurrent claims produce exactly one valid owner | `concurrent_claim_attempts_on_the_same_route_produce_exactly_one_active_holder` | Done |
 | An expired claim can be acquired by another worker | `another_worker_can_claim_after_the_prior_lease_expires` | Done |
 | A stale worker cannot complete after fencing/reassignment | `a_stale_holder_cannot_renew_release_or_complete_after_losing_its_claim` | Done |
-| Kernel restart does not lose accepted Requests, routes, claims, authority decisions, or required audit state | `tests/postgres_request_repository.rs`, `tests/postgres_route_repository.rs`, `tests/postgres_work_claim_repository.rs`, `tests/postgres_authority_repository.rs` (all ignored, live-DB) | **Now actually run, not just written**: every `#[ignore]`d live-Postgres test in the repo (13 files) has been executed against a real PostgreSQL instance (a `kind` Kubernetes cluster) and passes, run individually as documented — the first time in this project's history. Proven per-capability; not yet proven as one continuous restart test spanning the whole vertical slice in a single test — see Section 7 |
+| Kernel restart does not lose accepted Requests, routes, claims, authority decisions, or required audit state | `tests/postgres_request_repository.rs`, `tests/postgres_route_repository.rs`, `tests/postgres_work_claim_repository.rs`, `tests/postgres_authority_repository.rs` (all ignored, live-DB); `tests/vertical_slice_continuity_contract.rs` (ignored, live-DB) | Done. Every `#[ignore]`d live-Postgres test in the repo has been executed against a real PostgreSQL instance and passes, run individually as documented. `vertical_slice_continuity_contract.rs` closes the one remaining gap: submit, materialize, eligible-route query, claim, retry, read, complete, and a real reclaim/fencing race are now proven chained across one request's whole lifetime — including a real kernel restart (drop and reconnect `Application`) mid-scenario — not just per-repository |
 
 Do not require unrelated generalized features before tagging the MVP: none
 of these proofs depend on exclusive delivery, `all_of` selectors, artifact
@@ -1458,24 +1458,37 @@ What remains before tagging `v0.1.0` is finishing that validation, not new
 capability:
 
 1. ~~Complete real ADR-0008 Kubernetes TokenReview enrollment for the
-   reference services' identities~~ — **done and verified above.** What is
-   still open is running the *rest* of the path — submit, materialize,
-   claim, read, complete — as one real signed round trip: nothing in this
-   ecosystem yet submits a real signed `POST /v1/requests` (both reference
-   services are eligible-route *consumers*, not request *submitters*), so
-   this needs one more enrolled test identity and an active inclusive
-   subscription before it can be exercised for real.
-2. **Close any remaining transaction/idempotency gaps exposed by that
-   end-to-end path** — the individual pieces (acceptance, materialization,
-   eligible-route query, claim, routed-request read, completion) are each
-   already transactional or a plain read of already-committed state, and
-   are each independently proven against live PostgreSQL; this step is
-   about confirming that holds true chained together in one request's
-   lifetime.
-3. **Run the required retry, denial, crash/recovery, concurrency, and
-   fencing tests** ([Section 6](#6-mvp-failurerecovery-acceptance-tests))
-   as one continuous scenario, including the restart proof that today is
-   proven per-capability, not yet chained into a single scenario.
+   reference services' identities~~ — **done and verified above.**
+2. ~~Close any remaining transaction/idempotency gaps exposed by that
+   end-to-end path~~ — **done.** `tests/vertical_slice_continuity_contract.rs`
+   proves acceptance, materialization, the eligible-route query, claiming,
+   a safe retry, the destination-scoped read, and completion all hold
+   together against live PostgreSQL in one request's lifetime, including a
+   real kernel restart (dropping and reconnecting `Application`) partway
+   through.
+3. ~~Run the required retry, denial, crash/recovery, concurrency, and
+   fencing tests as one continuous scenario~~ — **substantially done.**
+   The same test chains retry, crash/recovery (restart), and reclaim/
+   fencing (a second worker instance reclaiming an expired lease, then the
+   original holder's stale token failing to renew/release/complete)
+   together. Denial and same-route concurrent-claim racing are deliberately
+   *not* re-proven there: both already have their own dedicated,
+   independent live/unit proofs (`default_deny_when_no_grant_matches`,
+   `unreachable_evaluator_is_denied_never_implicitly_allowed`,
+   `concurrent_claim_attempts_on_the_same_route_produce_exactly_one_active_holder`),
+   and ILK-002 denial specifically lives at the HTTP layer (the evaluator
+   call), one layer above where this chained test deliberately operates
+   (see that test file's own module documentation for why) — composing
+   them in too would duplicate coverage without adding a new chained
+   proof, not close a real gap.
+4. Still open, but genuine infrastructure rather than kernel code: nothing
+   in this ecosystem yet performs a real signed `POST /v1/requests` end to
+   end the way `infernal-taskmaster-simple`/`infernal-worker-simple` now
+   perform real signed `GET /v1/routes/eligible` calls — both are eligible-
+   route *consumers*, not request *submitters*. Exercising the full signed
+   HTTP path for submission (as opposed to the service-layer proof above)
+   would need one more enrolled test identity and an active inclusive
+   subscription.
 
 See the [completion checklist](#remaining-work-before-v010-minimum-viable-kernel)
 at the end of this document for the same list in one place.
@@ -2014,25 +2027,28 @@ deploy into a real Kubernetes cluster, and start correctly; the full
 live-Postgres test suite has actually been run against real PostgreSQL
 and passes. What is left is finishing that validation, not new capability:
 
-- Run the request-facing half of the vertical slice — submit, materialize,
-  claim, read, complete — as one real signed round trip. TLS (an nginx
-  sidecar in front of the kernel's Kubernetes `Service`) and ADR-0008
-  enrollment are both done and verified end to end against a real kind
-  cluster: `infernal-taskmaster-simple` and `infernal-worker-simple`
+- Done: request/route/claim/completion state durably holds together
+  across one request's whole lifetime, including a real kernel restart
+  mid-scenario, and the required retry/crash-recovery/fencing tests are
+  chained into that same scenario
+  (`tests/vertical_slice_continuity_contract.rs`, live PostgreSQL).
+  Denial and same-route concurrent-claim racing are intentionally proven
+  separately, not re-composed into this scenario — see Section 7's
+  numbered list for why.
+- Done: TLS (an nginx sidecar in front of the kernel's Kubernetes
+  `Service`) and ADR-0008 enrollment, verified end to end against a real
+  kind cluster — `infernal-taskmaster-simple` and `infernal-worker-simple`
   complete real signed HTTPS calls, enroll a fresh instance key against
-  the live TokenReview API, and then poll `GET /v1/routes/eligible`
-  successfully and continuously. What has not yet been exercised for real
-  is the submitting side: nothing in this ecosystem yet performs a signed
-  `POST /v1/requests`, so completing this needs one more enrolled test
-  identity and an active inclusive subscription.
-- Confirm required request/route/claim/completion/audit state is durably
-  recorded across that end-to-end path (already true per-capability,
-  proven against live PostgreSQL; this is a confirmation that it holds
-  chained together, not new invariants).
-- Close any transaction/idempotency gaps exposed by that end-to-end path.
-- Pass the required retry, denial, crash/recovery, concurrency, and
-  fencing tests ([Section 6](#6-mvp-failurerecovery-acceptance-tests)) as
-  one continuous scenario.
+  the live TokenReview API, and poll `GET /v1/routes/eligible`
+  successfully and continuously.
+- Still open, and genuine infrastructure rather than kernel code: running
+  the request-*submitting* half of the vertical slice as a real signed
+  HTTP round trip. Both reference services are eligible-route
+  *consumers*, not request *submitters* — nothing in this ecosystem yet
+  performs a signed `POST /v1/requests`, so this needs one more enrolled
+  test identity and an active inclusive subscription. The state-durability
+  and retry/recovery/fencing behavior this round trip would exercise is
+  already proven at the service layer, live, above.
 
 Nothing else belongs on this list. Exclusive delivery, `all_of` selectors,
 backlog matching, route transition history, correlation/causation,
