@@ -30,12 +30,14 @@ use crate::kernel::request_gate::{
 };
 use crate::kernel::requests::{
     ActionName, RequestAcceptance, RequestError, RequestId, RequestRepository, RequestService,
+    Route, RouteRepository, RouteService,
 };
 use crate::kernel::service_requests::{
     ServiceRequestAuthenticationError, ServiceRequestParts, SignedServiceRequest,
 };
 use crate::kernel::subscriptions::{
-    SubscriptionError, SubscriptionId, SubscriptionRepository, SubscriptionService,
+    DeliveryMode, EventType, SubscriptionError, SubscriptionId, SubscriptionRepository,
+    SubscriptionService,
 };
 use crate::kernel::{admission::AdmissionError, replay_protection::ReplayProtectionError};
 use crate::wiring::Application;
@@ -236,6 +238,77 @@ where
     }
 }
 
+/// Materializes ILK-010 routes for an accepted request -- the bridge
+/// between ILK-003 (owns the request and its routes) and ILK-010 (owns
+/// subscription matching), composed here rather than having either kernel
+/// module depend on the other's repository. This is deliberately the
+/// minimum slice: only currently-active inclusive subscriptions are
+/// considered (matched directly against the subscription's own
+/// `EventType`, reused as-is for the request's action rather than a
+/// separate typed field); a subscription committed *after* this call
+/// will not retroactively see this request until a later backlog-matching
+/// slice exists.
+pub trait RequestRouter {
+    fn materialize_routes(
+        &self,
+        source_service: ActorId,
+        request_id: RequestId,
+        action: &ActionName,
+        now: i64,
+    ) -> Result<Vec<Route>, RequestError>;
+}
+
+pub struct SubscriptionRouter<'a, S, RR> {
+    subscriptions: &'a SubscriptionService<S>,
+    routes: &'a RouteService<RR>,
+}
+
+impl<'a, S, RR> SubscriptionRouter<'a, S, RR> {
+    pub const fn new(
+        subscriptions: &'a SubscriptionService<S>,
+        routes: &'a RouteService<RR>,
+    ) -> Self {
+        Self {
+            subscriptions,
+            routes,
+        }
+    }
+}
+
+impl<S, RR> RequestRouter for SubscriptionRouter<'_, S, RR>
+where
+    S: SubscriptionRepository,
+    RR: RouteRepository,
+{
+    fn materialize_routes(
+        &self,
+        source_service: ActorId,
+        request_id: RequestId,
+        action: &ActionName,
+        now: i64,
+    ) -> Result<Vec<Route>, RequestError> {
+        let event_type = EventType::new(action.as_str())
+            .map_err(|_| RequestError::Repository("action is not a valid event type".to_owned()))?;
+        let matching = self
+            .subscriptions
+            .find_active_by_event_type(&event_type)
+            .map_err(|error| RequestError::Repository(error.to_string()))?;
+        matching
+            .into_iter()
+            .filter(|subscription| matches!(subscription.delivery_mode(), DeliveryMode::Inclusive))
+            .map(|subscription| {
+                self.routes.materialize(
+                    source_service,
+                    request_id,
+                    subscription.id(),
+                    subscription.service_id(),
+                    now,
+                )
+            })
+            .collect()
+    }
+}
+
 pub fn serve(application: Application) -> std::io::Result<()> {
     let address = env::var("BIND_ADDRESS").unwrap_or_else(|_| DEFAULT_ADDRESS.to_owned());
     let port = env::var("PORT").unwrap_or_else(|_| DEFAULT_PORT.to_owned());
@@ -323,12 +396,14 @@ fn dispatch(request: ParsedRequest, application: &Application) -> Response {
         };
         if path == "/v1/requests" || path.starts_with("/v1/requests/") {
             let envelope_request_id = RequestId::from_uuid(verified.request_id());
+            let router = SubscriptionRouter::new(application.subscriptions(), application.routes());
             return request_route(
                 &request,
                 service_id,
                 envelope_request_id,
                 application.requests(),
                 &authority,
+                &router,
             );
         }
         return subscription_route(
@@ -630,7 +705,7 @@ fn create_subscription<R: SubscriptionRepository, A: SubscriptionAuthorizer>(
     if let Some(response) = check_authorized(authority, service_id, "subscription.create") {
         return response;
     }
-    match subscriptions.create(service_id, event_type, unix_time()) {
+    match subscriptions.create(service_id, event_type, DeliveryMode::Inclusive, unix_time()) {
         Ok(subscription) => {
             json_response("201 Created", &SubscriptionResponse::from(&subscription))
         }
@@ -741,12 +816,13 @@ fn subscription_error_response(error: &SubscriptionError) -> Response {
 /// subscription management, submission is authorized against the
 /// request's own real action, scope, and schema versions -- the
 /// artifact-bearing case ILK-002 was designed for.
-fn request_route<R: RequestRepository, A: RequestAuthorizer>(
+fn request_route<R: RequestRepository, A: RequestAuthorizer, RT: RequestRouter>(
     request: &ParsedRequest,
     service_id: ActorId,
     envelope_request_id: RequestId,
     requests: &RequestService<R>,
     authority: &A,
+    router: &RT,
 ) -> Response {
     let path = request.path.split('?').next().unwrap_or(&request.path);
     if path == "/v1/requests" {
@@ -757,6 +833,7 @@ fn request_route<R: RequestRepository, A: RequestAuthorizer>(
                 envelope_request_id,
                 requests,
                 authority,
+                router,
             ),
             _ => text_response("405 Method Not Allowed", "method not allowed\n"),
         };
@@ -767,12 +844,13 @@ fn request_route<R: RequestRepository, A: RequestAuthorizer>(
     }
 }
 
-fn submit_request<R: RequestRepository, A: RequestAuthorizer>(
+fn submit_request<R: RequestRepository, A: RequestAuthorizer, RT: RequestRouter>(
     request: &ParsedRequest,
     service_id: ActorId,
     envelope_request_id: RequestId,
     requests: &RequestService<R>,
     authority: &A,
+    router: &RT,
 ) -> Response {
     if !request
         .content_type
@@ -819,15 +897,31 @@ fn submit_request<R: RequestRepository, A: RequestAuthorizer>(
         }
     }
     let fingerprint = submitted.fingerprint();
-    match requests.accept(submitted, fingerprint) {
-        Ok(RequestAcceptance::Accepted(record)) => {
-            json_response("201 Created", &AcceptedRequestResponse::from(&record))
-        }
-        Ok(RequestAcceptance::SafeRetry(record)) => {
-            json_response("200 OK", &AcceptedRequestResponse::from(&record))
-        }
-        Err(error) => request_error_response(&error),
+    let (status, record) = match requests.accept(submitted, fingerprint) {
+        Ok(RequestAcceptance::Accepted(record)) => ("201 Created", record),
+        Ok(RequestAcceptance::SafeRetry(record)) => ("200 OK", record),
+        Err(error) => return request_error_response(&error),
+    };
+    // Route materialization runs on both a fresh acceptance and a safe
+    // retry, since a prior attempt may have accepted the request and then
+    // crashed before materializing routes -- idempotent materialization
+    // makes re-running this safe either way. A failure here does not
+    // change the response: the request is already durably accepted
+    // (ILK-003 requires acceptance to not depend on subscription state),
+    // so routing is retried as a side effect of the client's own retry,
+    // not surfaced as this call failing.
+    if let Err(error) = router.materialize_routes(
+        record.request().source_service(),
+        record.request().id(),
+        record.request().action(),
+        now,
+    ) {
+        eprintln!(
+            "route materialization failed for request {}: {error}",
+            record.request().id()
+        );
     }
+    json_response(status, &AcceptedRequestResponse::from(&record))
 }
 
 fn find_request<R: RequestRepository>(
@@ -859,7 +953,10 @@ fn request_error_response(error: &RequestError) -> Response {
             json_response("409 Conflict", &GovernedErrorResponse::request_conflict())
         }
         RequestError::UnknownSource(_) => authentication_rejected(),
-        RequestError::UnknownSchemaVersion | RequestError::Repository(_) => json_response(
+        RequestError::UnknownSchemaVersion
+        | RequestError::UnknownSubscription
+        | RequestError::InvalidRouteId
+        | RequestError::Repository(_) => json_response(
             "503 Service Unavailable",
             &GovernedErrorResponse::internal_error(),
         ),
@@ -1511,11 +1608,26 @@ mod tests {
                     value.id(),
                     value.service_id(),
                     value.event_type().clone(),
+                    value.delivery_mode(),
                     value.created_at(),
                     Some(disabled_at),
                 )?;
                 *value = disabled.clone();
                 Ok(disabled)
+            }
+
+            fn find_active_by_event_type(
+                &self,
+                event_type: &EventType,
+            ) -> Result<Vec<Subscription>, SubscriptionError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|value| value.event_type() == event_type && value.is_active())
+                    .cloned()
+                    .collect())
             }
         }
 
@@ -1615,6 +1727,7 @@ mod tests {
                 .create(
                     service_id,
                     EventType::new("resource.created.v1").unwrap(),
+                    DeliveryMode::Inclusive,
                     1,
                 )
                 .unwrap();
@@ -1640,10 +1753,20 @@ mod tests {
             let owner = ActorId::new();
             let other = ActorId::new();
             subscriptions
-                .create(owner, EventType::new("resource.created.v1").unwrap(), 1)
+                .create(
+                    owner,
+                    EventType::new("resource.created.v1").unwrap(),
+                    DeliveryMode::Inclusive,
+                    1,
+                )
                 .unwrap();
             subscriptions
-                .create(other, EventType::new("resource.deleted.v1").unwrap(), 1)
+                .create(
+                    other,
+                    EventType::new("resource.deleted.v1").unwrap(),
+                    DeliveryMode::Inclusive,
+                    1,
+                )
                 .unwrap();
 
             let response = list_subscriptions("/v1/subscriptions", owner, &subscriptions);
@@ -1658,7 +1781,12 @@ mod tests {
             let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
             let owner = ActorId::new();
             let created = subscriptions
-                .create(owner, EventType::new("resource.created.v1").unwrap(), 1)
+                .create(
+                    owner,
+                    EventType::new("resource.created.v1").unwrap(),
+                    DeliveryMode::Inclusive,
+                    1,
+                )
                 .unwrap();
             subscriptions.disable(owner, created.id(), 2).unwrap();
 
@@ -1678,7 +1806,12 @@ mod tests {
             let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
             let owner = ActorId::new();
             let created = subscriptions
-                .create(owner, EventType::new("resource.created.v1").unwrap(), 1)
+                .create(
+                    owner,
+                    EventType::new("resource.created.v1").unwrap(),
+                    DeliveryMode::Inclusive,
+                    1,
+                )
                 .unwrap();
 
             let response = disable_subscription(
@@ -1712,7 +1845,12 @@ mod tests {
             let owner = ActorId::new();
             let stranger = ActorId::new();
             let created = subscriptions
-                .create(owner, EventType::new("resource.created.v1").unwrap(), 1)
+                .create(
+                    owner,
+                    EventType::new("resource.created.v1").unwrap(),
+                    DeliveryMode::Inclusive,
+                    1,
+                )
                 .unwrap();
 
             let response = disable_subscription(
@@ -1810,7 +1948,12 @@ mod tests {
             let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
             let owner = ActorId::new();
             let created = subscriptions
-                .create(owner, EventType::new("resource.created.v1").unwrap(), 1)
+                .create(
+                    owner,
+                    EventType::new("resource.created.v1").unwrap(),
+                    DeliveryMode::Inclusive,
+                    1,
+                )
                 .unwrap();
 
             let response = disable_subscription(
@@ -1828,7 +1971,12 @@ mod tests {
             let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
             let owner = ActorId::new();
             let created = subscriptions
-                .create(owner, EventType::new("resource.created.v1").unwrap(), 1)
+                .create(
+                    owner,
+                    EventType::new("resource.created.v1").unwrap(),
+                    DeliveryMode::Inclusive,
+                    1,
+                )
                 .unwrap();
 
             let response = disable_subscription(
@@ -1846,7 +1994,12 @@ mod tests {
             let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
             let owner = ActorId::new();
             let created = subscriptions
-                .create(owner, EventType::new("resource.created.v1").unwrap(), 1)
+                .create(
+                    owner,
+                    EventType::new("resource.created.v1").unwrap(),
+                    DeliveryMode::Inclusive,
+                    1,
+                )
                 .unwrap();
 
             disable_subscription(
@@ -2119,6 +2272,24 @@ mod tests {
             }
         }
 
+        /// A `RequestRouter` fixture that materializes nothing and never
+        /// fails, so tests of `submit_request`/`find_request` themselves
+        /// don't need a real `SubscriptionService`/`RouteService` pair.
+        /// Route materialization has its own dedicated tests below.
+        struct NoopRouter;
+
+        impl RequestRouter for NoopRouter {
+            fn materialize_routes(
+                &self,
+                _source_service: ActorId,
+                _request_id: RequestId,
+                _action: &ActionName,
+                _now: i64,
+            ) -> Result<Vec<Route>, RequestError> {
+                Ok(Vec::new())
+            }
+        }
+
         fn submission_body() -> String {
             format!(
                 r#"{{"action":"billing.invoice.submit","scope":"invoice-4471","artifact_schema_version_id":"{}","permission_policy_schema_version_id":"{}"}}"#,
@@ -2155,6 +2326,7 @@ mod tests {
                 RequestId::new(),
                 &requests,
                 &FixedAuthority::allow(),
+                &NoopRouter,
             );
 
             assert_eq!(response.status, "201 Created");
@@ -2175,6 +2347,7 @@ mod tests {
                 envelope_request_id,
                 &requests,
                 &FixedAuthority::allow(),
+                &NoopRouter,
             );
             assert_eq!(first.status, "201 Created");
 
@@ -2184,6 +2357,7 @@ mod tests {
                 envelope_request_id,
                 &requests,
                 &FixedAuthority::allow(),
+                &NoopRouter,
             );
 
             assert_eq!(retry.status, "200 OK");
@@ -2200,6 +2374,7 @@ mod tests {
                 RequestId::new(),
                 &requests,
                 &FixedAuthority::deny(),
+                &NoopRouter,
             );
 
             assert_eq!(response.status, "403 Forbidden");
@@ -2216,6 +2391,7 @@ mod tests {
                 RequestId::new(),
                 &requests,
                 &FixedAuthority::unavailable(),
+                &NoopRouter,
             );
 
             assert_eq!(response.status, "503 Service Unavailable");
@@ -2233,6 +2409,7 @@ mod tests {
                 RequestId::new(),
                 &requests,
                 &FixedAuthority::allow(),
+                &NoopRouter,
             );
 
             assert_eq!(response.status, "415 Unsupported Media Type");
@@ -2249,6 +2426,7 @@ mod tests {
                 RequestId::new(),
                 &requests,
                 &FixedAuthority::allow(),
+                &NoopRouter,
             );
 
             assert_eq!(response.status, "400 Bad Request");
@@ -2330,6 +2508,7 @@ mod tests {
                 RequestId::new(),
                 &requests,
                 &FixedAuthority::allow(),
+                &NoopRouter,
             );
             assert_eq!(submitted.status, "201 Created");
 
@@ -2355,8 +2534,236 @@ mod tests {
                 RequestId::new(),
                 &requests,
                 &FixedAuthority::allow(),
+                &NoopRouter,
             );
             assert_eq!(found.status, "200 OK");
+        }
+    }
+
+    mod subscription_router {
+        use std::sync::{Arc, Mutex};
+
+        use super::super::*;
+        use crate::kernel::requests::Route;
+        use crate::kernel::subscriptions::{DeliveryMode, EventType, Subscription};
+
+        #[derive(Clone, Default)]
+        struct MemorySubscriptions(Arc<Mutex<Vec<Subscription>>>);
+
+        impl MemorySubscriptions {
+            fn seed(&self, subscription: Subscription) {
+                self.0.lock().unwrap().push(subscription);
+            }
+        }
+
+        impl SubscriptionRepository for MemorySubscriptions {
+            fn insert(&self, subscription: Subscription) -> Result<(), SubscriptionError> {
+                self.0.lock().unwrap().push(subscription);
+                Ok(())
+            }
+
+            fn list_for_service(
+                &self,
+                service_id: ActorId,
+            ) -> Result<Vec<Subscription>, SubscriptionError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|value| value.service_id() == service_id)
+                    .cloned()
+                    .collect())
+            }
+
+            fn list_active_for_service(
+                &self,
+                service_id: ActorId,
+            ) -> Result<Vec<Subscription>, SubscriptionError> {
+                self.list_for_service(service_id)
+                    .map(|values| values.into_iter().filter(Subscription::is_active).collect())
+            }
+
+            fn disable(
+                &self,
+                _service_id: ActorId,
+                subscription_id: SubscriptionId,
+                _disabled_at: i64,
+            ) -> Result<Subscription, SubscriptionError> {
+                Err(SubscriptionError::NotFound(subscription_id))
+            }
+
+            fn find_active_by_event_type(
+                &self,
+                event_type: &EventType,
+            ) -> Result<Vec<Subscription>, SubscriptionError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|value| value.event_type() == event_type && value.is_active())
+                    .cloned()
+                    .collect())
+            }
+        }
+
+        #[derive(Clone, Default)]
+        struct MemoryRoutes(Arc<Mutex<Vec<Route>>>);
+
+        impl RouteRepository for MemoryRoutes {
+            fn materialize(&self, route: Route) -> Result<Route, RequestError> {
+                let mut routes = self.0.lock().unwrap();
+                if let Some(existing) = routes.iter().find(|value| {
+                    value.request_id() == route.request_id()
+                        && value.subscription_id() == route.subscription_id()
+                }) {
+                    return Ok(existing.clone());
+                }
+                routes.push(route.clone());
+                Ok(route)
+            }
+
+            fn list_for_request(&self, request_id: RequestId) -> Result<Vec<Route>, RequestError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|route| route.request_id() == request_id)
+                    .cloned()
+                    .collect())
+            }
+        }
+
+        fn active_subscription(owner: ActorId, event_type: &str) -> Subscription {
+            Subscription::restore(
+                SubscriptionId::new(),
+                owner,
+                EventType::new(event_type).unwrap(),
+                DeliveryMode::Inclusive,
+                0,
+                None,
+            )
+            .unwrap()
+        }
+
+        #[test]
+        fn materializes_a_route_for_each_matching_active_subscription() {
+            let owner = ActorId::new();
+            let repository = MemorySubscriptions::default();
+            repository.seed(active_subscription(owner, "billing.invoice.submit"));
+            let subscriptions = SubscriptionService::new(repository);
+            let routes = RouteService::new(MemoryRoutes::default());
+            let router = SubscriptionRouter::new(&subscriptions, &routes);
+            let source = ActorId::new();
+            let request_id = RequestId::new();
+
+            let materialized = router
+                .materialize_routes(
+                    source,
+                    request_id,
+                    &ActionName::new("billing.invoice.submit").unwrap(),
+                    100,
+                )
+                .unwrap();
+
+            assert_eq!(materialized.len(), 1);
+            assert_eq!(materialized[0].destination_service(), owner);
+            assert_eq!(routes.list_for_request(request_id).unwrap().len(), 1);
+        }
+
+        #[test]
+        fn a_request_with_no_matching_subscription_materializes_no_routes_and_does_not_fail() {
+            let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
+            let routes = RouteService::new(MemoryRoutes::default());
+            let router = SubscriptionRouter::new(&subscriptions, &routes);
+
+            let materialized = router
+                .materialize_routes(
+                    ActorId::new(),
+                    RequestId::new(),
+                    &ActionName::new("billing.invoice.submit").unwrap(),
+                    100,
+                )
+                .unwrap();
+
+            assert!(materialized.is_empty());
+        }
+
+        #[test]
+        fn a_disabled_subscription_never_matches() {
+            let repository = MemorySubscriptions::default();
+            let owner = ActorId::new();
+            let disabled = Subscription::restore(
+                SubscriptionId::new(),
+                owner,
+                EventType::new("billing.invoice.submit").unwrap(),
+                DeliveryMode::Inclusive,
+                0,
+                Some(50),
+            )
+            .unwrap();
+            repository.seed(disabled);
+            let subscriptions = SubscriptionService::new(repository);
+            let routes = RouteService::new(MemoryRoutes::default());
+            let router = SubscriptionRouter::new(&subscriptions, &routes);
+
+            let materialized = router
+                .materialize_routes(
+                    ActorId::new(),
+                    RequestId::new(),
+                    &ActionName::new("billing.invoice.submit").unwrap(),
+                    100,
+                )
+                .unwrap();
+
+            assert!(materialized.is_empty());
+        }
+
+        #[test]
+        fn materializing_the_same_request_twice_does_not_duplicate_routes() {
+            let repository = MemorySubscriptions::default();
+            let owner = ActorId::new();
+            repository.seed(active_subscription(owner, "billing.invoice.submit"));
+            let subscriptions = SubscriptionService::new(repository);
+            let routes = RouteService::new(MemoryRoutes::default());
+            let router = SubscriptionRouter::new(&subscriptions, &routes);
+            let source = ActorId::new();
+            let request_id = RequestId::new();
+            let action = ActionName::new("billing.invoice.submit").unwrap();
+
+            router
+                .materialize_routes(source, request_id, &action, 100)
+                .unwrap();
+            router
+                .materialize_routes(source, request_id, &action, 200)
+                .unwrap();
+
+            assert_eq!(routes.list_for_request(request_id).unwrap().len(), 1);
+        }
+
+        #[test]
+        fn a_different_event_type_does_not_match() {
+            let repository = MemorySubscriptions::default();
+            repository.seed(active_subscription(
+                ActorId::new(),
+                "billing.invoice.cancel",
+            ));
+            let subscriptions = SubscriptionService::new(repository);
+            let routes = RouteService::new(MemoryRoutes::default());
+            let router = SubscriptionRouter::new(&subscriptions, &routes);
+
+            let materialized = router
+                .materialize_routes(
+                    ActorId::new(),
+                    RequestId::new(),
+                    &ActionName::new("billing.invoice.submit").unwrap(),
+                    100,
+                )
+                .unwrap();
+
+            assert!(materialized.is_empty());
         }
     }
 }

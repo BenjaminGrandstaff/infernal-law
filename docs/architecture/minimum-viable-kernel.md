@@ -526,9 +526,16 @@ Implementation status:
   `NO_ARTIFACT_SCHEMA_VERSION` sentinel. `GET /v1/requests/{id}` reads back
   only the caller's own accepted request; another service's request looks
   identical to one that does not exist.
-- Pending: correlation relationships, exclusive-group and
-  inclusive-destination route records and transition history, and
-  subscription-triggered backlog routing.
+- Complete (first slice): `Route`, `RouteRepository`, and `RouteService`
+  (`src/kernel/requests.rs`) -- an accepted request's independent,
+  idempotently-materialized destinations, one per matching active inclusive
+  subscription (ILK-010). See ILK-010's own status for the matching side of
+  this; no delivery state, transition history, or work claim exists on a
+  route yet (ILK-011) -- it records only that a destination is eligible.
+- Pending: correlation relationships, exclusive-group routes and their
+  consumer-group semantics, route transition history, work claims/leasing
+  (ILK-011), and subscription-triggered backlog routing (a subscription
+  committed after a request does not yet retroactively see it).
 
 ### ILK-004: Versions
 
@@ -782,11 +789,31 @@ Implementation status:
   decision (see ILK-002's own status above for the evaluator wiring and the
   still-open gaps that keep it fail-closed against a real Postgres backend
   today); list does not, since it changes no governed administrative state.
-- Pending: typed delivery modes, consumer groups, immutable all-of state
-  selectors, pending request backlog matching, fenced route assignment and
-  completion, delivery cursors, production outbound handshake transport, and
-  the eligible-route query contract external scheduler services will use
-  (ADR-0011).
+- Complete (first slice): typed `DeliveryMode` on `Subscription` -- only
+  `Inclusive` exists so far, modeled as an enum from the start (not a bool)
+  because ILK-010 requires an omitted or unknown mode to fail closed, not
+  default to some behavior. `SubscriptionRepository::find_active_by_event_type`
+  is the new kernel-internal (never directly HTTP-exposed) query request
+  materialization uses to find every currently-active subscription matching
+  a request's action, across all owning services.
+- Complete (first slice): request-to-route materialization. Submitting a
+  request (`POST /v1/requests`) matches its action against active inclusive
+  subscriptions (`SubscriptionRouter` in `src/http.rs`, composing
+  `SubscriptionService` and the new `RouteService` without either kernel
+  module depending on the other's repository) and idempotently materializes
+  a `Route` per match, keyed by `(request_id, subscription_id)` so repeated
+  scans or retries never create a second route. A materialization failure
+  does not fail the submission response -- the request is already durably
+  accepted (ILK-003 requires acceptance to not depend on subscription
+  state) -- it is logged and naturally retried if the client retries.
+- Pending, deliberately deferred from the slice above: exclusive delivery
+  with consumer groups, immutable all-of state selectors, backlog matching
+  (a subscription committed *after* a request currently never finds it --
+  only subscriptions active at submission time are considered), route
+  transition history, fenced route assignment and completion (ILK-011 work
+  claims, still an unimplemented stub), delivery cursors, production
+  outbound handshake transport, and the eligible-route query contract
+  external scheduler services will use (ADR-0011).
 - Out of kernel scope: capacity-aware delivery, worker/node placement, and
   retry-timing policy. Those belong to an external scheduler service, not the
   kernel (ADR-0011).

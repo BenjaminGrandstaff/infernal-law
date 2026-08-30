@@ -12,6 +12,7 @@ use uuid::Uuid;
 use super::Requirement;
 use super::authority::{SchemaVersionRefs, Scope};
 use super::identity::ActorId;
+use super::subscriptions::SubscriptionId;
 
 pub const REQUIREMENT: Requirement = Requirement::new(
     "ILK-003",
@@ -230,6 +231,170 @@ where
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RouteId(Uuid);
+
+impl RouteId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub const fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+}
+
+impl Default for RouteId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Display for RouteId {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        Display::fmt(&self.0, formatter)
+    }
+}
+
+impl FromStr for RouteId {
+    type Err = RequestError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(value)
+            .map(Self)
+            .map_err(|_| RequestError::InvalidRouteId)
+    }
+}
+
+/// An independent destination the kernel materialized for an accepted
+/// request, because some active inclusive subscription matched it
+/// (ILK-010). One request may have many routes, one per matching
+/// subscription; each is materialized at most once, keyed by
+/// `(request_id, subscription_id)` -- repeated scans, wakeups, or retries
+/// of the same match never create a second route. This is deliberately the
+/// minimum slice: no delivery state, transition history, or work claim yet
+/// (ILK-011) -- a route here records only that a destination is eligible,
+/// nothing about whether it has been worked.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Route {
+    id: RouteId,
+    source_service: ActorId,
+    request_id: RequestId,
+    subscription_id: SubscriptionId,
+    destination_service: ActorId,
+    created_at: i64,
+}
+
+impl Route {
+    pub fn create(
+        source_service: ActorId,
+        request_id: RequestId,
+        subscription_id: SubscriptionId,
+        destination_service: ActorId,
+        created_at: i64,
+    ) -> Result<Self, RequestError> {
+        Self::restore(
+            RouteId::new(),
+            source_service,
+            request_id,
+            subscription_id,
+            destination_service,
+            created_at,
+        )
+    }
+
+    pub fn restore(
+        id: RouteId,
+        source_service: ActorId,
+        request_id: RequestId,
+        subscription_id: SubscriptionId,
+        destination_service: ActorId,
+        created_at: i64,
+    ) -> Result<Self, RequestError> {
+        if created_at < 0 {
+            return Err(RequestError::InvalidAcceptedAt);
+        }
+        Ok(Self {
+            id,
+            source_service,
+            request_id,
+            subscription_id,
+            destination_service,
+            created_at,
+        })
+    }
+
+    pub const fn id(&self) -> RouteId {
+        self.id
+    }
+
+    pub const fn source_service(&self) -> ActorId {
+        self.source_service
+    }
+
+    pub const fn request_id(&self) -> RequestId {
+        self.request_id
+    }
+
+    pub const fn subscription_id(&self) -> SubscriptionId {
+        self.subscription_id
+    }
+
+    pub const fn destination_service(&self) -> ActorId {
+        self.destination_service
+    }
+
+    pub const fn created_at(&self) -> i64 {
+        self.created_at
+    }
+}
+
+pub trait RouteRepository: Send + Sync {
+    /// Idempotently materializes `route`. If a route already exists for
+    /// `(request_id, subscription_id)`, returns that existing route
+    /// unchanged rather than creating a second one -- this is what makes
+    /// repeated matching scans, subscription wakeups, and retries safe.
+    fn materialize(&self, route: Route) -> Result<Route, RequestError>;
+
+    fn list_for_request(&self, request_id: RequestId) -> Result<Vec<Route>, RequestError>;
+}
+
+#[derive(Clone)]
+pub struct RouteService<R> {
+    repository: R,
+}
+
+impl<R> RouteService<R>
+where
+    R: RouteRepository,
+{
+    pub const fn new(repository: R) -> Self {
+        Self { repository }
+    }
+
+    pub fn materialize(
+        &self,
+        source_service: ActorId,
+        request_id: RequestId,
+        subscription_id: SubscriptionId,
+        destination_service: ActorId,
+        now: i64,
+    ) -> Result<Route, RequestError> {
+        let route = Route::create(
+            source_service,
+            request_id,
+            subscription_id,
+            destination_service,
+            now,
+        )?;
+        self.repository.materialize(route)
+    }
+
+    pub fn list_for_request(&self, request_id: RequestId) -> Result<Vec<Route>, RequestError> {
+        self.repository.list_for_request(request_id)
+    }
+}
+
 impl Request {
     pub fn create(
         source_service: ActorId,
@@ -340,10 +505,12 @@ pub enum RequestError {
     InvalidRequestId,
     InvalidActionName,
     InvalidAcceptedAt,
+    InvalidRouteId,
     RequestIdConflict(RequestId),
     Repository(String),
     UnknownSource(ActorId),
     UnknownSchemaVersion,
+    UnknownSubscription,
 }
 
 impl Display for RequestError {
@@ -356,6 +523,7 @@ impl Display for RequestError {
             Self::InvalidAcceptedAt => {
                 formatter.write_str("request acceptance timestamp is invalid")
             }
+            Self::InvalidRouteId => formatter.write_str("route ID must be a UUID"),
             Self::RequestIdConflict(id) => {
                 write!(formatter, "request ID {id} is bound to different content")
             }
@@ -365,6 +533,9 @@ impl Display for RequestError {
             }
             Self::UnknownSchemaVersion => {
                 formatter.write_str("referenced schema version was not found")
+            }
+            Self::UnknownSubscription => {
+                formatter.write_str("referenced subscription was not found")
             }
         }
     }

@@ -5,22 +5,27 @@ use r2d2_postgres::postgres::{Error as PostgresError, Row, Transaction, error::S
 
 use crate::kernel::identity::ActorId;
 use crate::kernel::subscriptions::{
-    EventType, Subscription, SubscriptionError, SubscriptionId, SubscriptionRepository,
+    DeliveryMode, EventType, Subscription, SubscriptionError, SubscriptionId,
+    SubscriptionRepository,
 };
 
 use super::database::Database;
 
 const LIST_HISTORY_SQL: &str = "SELECT id::text, service_id::text, event_type, \
-        created_at, disabled_at FROM subscriptions \
+        delivery_mode, created_at, disabled_at FROM subscriptions \
     WHERE service_id = $1::text::uuid ORDER BY created_at, id";
 const LIST_ACTIVE_SQL: &str = "SELECT id::text, service_id::text, event_type, \
-        created_at, disabled_at FROM subscriptions \
+        delivery_mode, created_at, disabled_at FROM subscriptions \
     WHERE service_id = $1::text::uuid AND disabled_at IS NULL \
+    ORDER BY created_at, id";
+const FIND_ACTIVE_BY_EVENT_TYPE_SQL: &str = "SELECT id::text, service_id::text, event_type, \
+        delivery_mode, created_at, disabled_at FROM subscriptions \
+    WHERE event_type = $1 AND disabled_at IS NULL \
     ORDER BY created_at, id";
 const DISABLE_SQL: &str = "UPDATE subscriptions SET disabled_at = $3 \
     WHERE id = $1::text::uuid AND service_id = $2::text::uuid \
       AND disabled_at IS NULL AND created_at <= $3 \
-    RETURNING id::text, service_id::text, event_type, created_at, disabled_at";
+    RETURNING id::text, service_id::text, event_type, delivery_mode, created_at, disabled_at";
 
 #[derive(Clone)]
 pub struct PostgresSubscriptionRepository {
@@ -40,11 +45,18 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         let id = subscription.id().to_string();
         let service_id = subscription.service_id().to_string();
         let event_type = subscription.event_type().as_str();
+        let delivery_mode = delivery_mode_to_sql(subscription.delivery_mode());
         let result = transaction.execute(
             "INSERT INTO subscriptions \
-             (id, service_id, event_type, created_at) \
-             VALUES ($1::text::uuid, $2::text::uuid, $3, $4)",
-            &[&id, &service_id, &event_type, &subscription.created_at()],
+             (id, service_id, event_type, delivery_mode, created_at) \
+             VALUES ($1::text::uuid, $2::text::uuid, $3, $4, $5)",
+            &[
+                &id,
+                &service_id,
+                &event_type,
+                &delivery_mode,
+                &subscription.created_at(),
+            ],
         );
         match result {
             Ok(1) => {}
@@ -89,6 +101,19 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         service_id: ActorId,
     ) -> Result<Vec<Subscription>, SubscriptionError> {
         list(&self.database, service_id, true)
+    }
+
+    fn find_active_by_event_type(
+        &self,
+        event_type: &EventType,
+    ) -> Result<Vec<Subscription>, SubscriptionError> {
+        let mut connection = self.database.connection().map_err(repository_error)?;
+        connection
+            .query(FIND_ACTIVE_BY_EVENT_TYPE_SQL, &[&event_type.as_str()])
+            .map_err(repository_error)?
+            .iter()
+            .map(subscription_from_row)
+            .collect()
     }
 
     fn disable(
@@ -188,12 +213,13 @@ fn append_audit(
     transaction
         .execute(
             "INSERT INTO subscription_audit \
-             (subscription_id, service_id, event_type, action, recorded_at) \
-             VALUES ($1::text::uuid, $2::text::uuid, $3, $4, $5)",
+             (subscription_id, service_id, event_type, delivery_mode, action, recorded_at) \
+             VALUES ($1::text::uuid, $2::text::uuid, $3, $4, $5, $6)",
             &[
                 &subscription.id().to_string(),
                 &subscription.service_id().to_string(),
                 &subscription.event_type().as_str(),
+                &delivery_mode_to_sql(subscription.delivery_mode()),
                 &action,
                 &recorded_at,
             ],
@@ -211,14 +237,31 @@ fn subscription_from_row(row: &Row) -> Result<Subscription, SubscriptionError> {
             SubscriptionError::Repository(format!("invalid stored service ID: {error}"))
         })?;
     let event_type = row.get::<_, String>("event_type").parse::<EventType>()?;
+    let delivery_mode = delivery_mode_from_sql(row.get("delivery_mode"))?;
     Subscription::restore(
         id,
         service_id,
         event_type,
+        delivery_mode,
         row.get("created_at"),
         row.get("disabled_at"),
     )
     .map_err(|_| SubscriptionError::Repository("stored subscription is invalid".to_owned()))
+}
+
+fn delivery_mode_to_sql(delivery_mode: DeliveryMode) -> &'static str {
+    match delivery_mode {
+        DeliveryMode::Inclusive => "inclusive",
+    }
+}
+
+fn delivery_mode_from_sql(value: &str) -> Result<DeliveryMode, SubscriptionError> {
+    match value {
+        "inclusive" => Ok(DeliveryMode::Inclusive),
+        other => Err(SubscriptionError::Repository(format!(
+            "unknown stored delivery mode: {other}"
+        ))),
+    }
 }
 
 fn is_unique_violation(error: &PostgresError) -> bool {

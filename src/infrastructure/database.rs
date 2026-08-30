@@ -136,7 +136,11 @@ impl Database {
                 "\n",
                 include_str!("../../migrations/0013_authority_decision_schema_versions.sql"),
                 "\n",
-                include_str!("../../migrations/0014_request_schema_versions.sql")
+                include_str!("../../migrations/0014_request_schema_versions.sql"),
+                "\n",
+                include_str!("../../migrations/0015_subscription_delivery_modes.sql"),
+                "\n",
+                include_str!("../../migrations/0016_request_routes.sql")
             ))
             .map_err(DatabaseError::Query)
     }

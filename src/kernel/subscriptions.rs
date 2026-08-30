@@ -18,6 +18,18 @@ pub const REQUIREMENT: Requirement = Requirement::new(
 
 pub const MAX_EVENT_TYPE_LENGTH: usize = 200;
 
+/// How a subscription receives matching requests. Only `Inclusive` exists
+/// today (every matching subscription gets its own independent route);
+/// `Exclusive` with a consumer-group identity, where competing services
+/// share one route and completion, is a deferred, separate slice of
+/// ILK-010. Modeled as an enum from the start, even with one variant,
+/// because ILK-010 requires an omitted or unknown mode to fail closed
+/// rather than default to some behavior.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeliveryMode {
+    Inclusive,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SubscriptionId(Uuid);
 
@@ -105,6 +117,7 @@ pub struct Subscription {
     id: SubscriptionId,
     service_id: ActorId,
     event_type: EventType,
+    delivery_mode: DeliveryMode,
     created_at: i64,
     disabled_at: Option<i64>,
 }
@@ -113,15 +126,24 @@ impl Subscription {
     fn create(
         service_id: ActorId,
         event_type: EventType,
+        delivery_mode: DeliveryMode,
         now: i64,
     ) -> Result<Self, SubscriptionError> {
-        Self::restore(SubscriptionId::new(), service_id, event_type, now, None)
+        Self::restore(
+            SubscriptionId::new(),
+            service_id,
+            event_type,
+            delivery_mode,
+            now,
+            None,
+        )
     }
 
     pub fn restore(
         id: SubscriptionId,
         service_id: ActorId,
         event_type: EventType,
+        delivery_mode: DeliveryMode,
         created_at: i64,
         disabled_at: Option<i64>,
     ) -> Result<Self, SubscriptionError> {
@@ -132,6 +154,7 @@ impl Subscription {
             id,
             service_id,
             event_type,
+            delivery_mode,
             created_at,
             disabled_at,
         })
@@ -147,6 +170,10 @@ impl Subscription {
 
     pub const fn event_type(&self) -> &EventType {
         &self.event_type
+    }
+
+    pub const fn delivery_mode(&self) -> DeliveryMode {
+        self.delivery_mode
     }
 
     pub const fn created_at(&self) -> i64 {
@@ -176,6 +203,16 @@ pub trait SubscriptionRepository: Send + Sync {
         subscription_id: SubscriptionId,
         disabled_at: i64,
     ) -> Result<Subscription, SubscriptionError>;
+
+    /// Every currently-active subscription (across all owning services)
+    /// declaring `event_type`, for request-routing materialization
+    /// (ILK-003). Unlike the other queries here, this is not scoped to one
+    /// caller's own service -- it is kernel-internal, never exposed
+    /// directly over HTTP to a single caller.
+    fn find_active_by_event_type(
+        &self,
+        event_type: &EventType,
+    ) -> Result<Vec<Subscription>, SubscriptionError>;
 }
 
 #[derive(Clone)]
@@ -195,9 +232,10 @@ where
         &self,
         service_id: ActorId,
         event_type: EventType,
+        delivery_mode: DeliveryMode,
         now: i64,
     ) -> Result<Subscription, SubscriptionError> {
-        let subscription = Subscription::create(service_id, event_type, now)?;
+        let subscription = Subscription::create(service_id, event_type, delivery_mode, now)?;
         self.repository.insert(subscription.clone())?;
         Ok(subscription)
     }
@@ -208,6 +246,16 @@ where
 
     pub fn list_active(&self, service_id: ActorId) -> Result<Vec<Subscription>, SubscriptionError> {
         self.repository.list_active_for_service(service_id)
+    }
+
+    /// Every currently-active subscription declaring `event_type`, for
+    /// request-routing materialization. See
+    /// [`SubscriptionRepository::find_active_by_event_type`].
+    pub fn find_active_by_event_type(
+        &self,
+        event_type: &EventType,
+    ) -> Result<Vec<Subscription>, SubscriptionError> {
+        self.repository.find_active_by_event_type(event_type)
     }
 
     pub fn disable(

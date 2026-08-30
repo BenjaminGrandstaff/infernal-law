@@ -57,6 +57,12 @@ It listens on `0.0.0.0:8080` by default and provides:
   schema versions (the same `POLICY_EVALUATOR_*` configuration as
   subscriptions above) — this is the artifact-bearing case that machinery
   exists for. `GET` reads back only the caller's own request.
+  Acceptance also idempotently materializes an ILK-010 route to every
+  currently-active *inclusive* subscription whose event type matches the
+  request's action (exclusive/consumer-group delivery and backlog matching
+  for a subscription created afterward are not built yet); a materialization
+  failure never fails the submission response, since the request is already
+  durably accepted.
 
 Set `BIND_ADDRESS` or `PORT` to change the listener configuration. Startup
 fails if `DATABASE_URL` or `INFERNAL_LAW_SERVICE_ID` is absent, the service ID

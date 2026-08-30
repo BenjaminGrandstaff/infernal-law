@@ -16,6 +16,7 @@ use crate::infrastructure::postgres_identity_repository::PostgresIdentityReposit
 use crate::infrastructure::postgres_instance_registry::PostgresInstanceRegistry;
 use crate::infrastructure::postgres_replay_protection_repository::PostgresReplayProtectionRepository;
 use crate::infrastructure::postgres_request_repository::PostgresRequestRepository;
+use crate::infrastructure::postgres_route_repository::PostgresRouteRepository;
 use crate::infrastructure::postgres_subscribed_instance_discovery::PostgresSubscribedInstanceDiscovery;
 use crate::infrastructure::postgres_subscription_repository::PostgresSubscriptionRepository;
 use crate::kernel::admission::AdmissionService;
@@ -27,7 +28,7 @@ use crate::kernel::instance_keys::{InstanceCredential, InstancePublicKey, Instan
 use crate::kernel::instance_registry::{InstanceRegistryService, LeasePolicy};
 use crate::kernel::replay_protection::ReplayProtectionService;
 use crate::kernel::request_gate::ServiceRequestGate;
-use crate::kernel::requests::RequestService;
+use crate::kernel::requests::{RequestService, RouteService};
 use crate::kernel::service_requests::ServiceRequestVerifier;
 use crate::kernel::subscriptions::SubscriptionService;
 
@@ -44,6 +45,7 @@ pub struct Application {
     schemas: SchemaService<PostgresAuthorityRepository>,
     replay_protection: ReplayProtectionService<PostgresReplayProtectionRepository>,
     requests: RequestService<PostgresRequestRepository>,
+    routes: RouteService<PostgresRouteRepository>,
 }
 
 impl Application {
@@ -70,6 +72,7 @@ impl Application {
         let replay_protection =
             ReplayProtectionService::new(PostgresReplayProtectionRepository::new(database.clone()));
         let requests = RequestService::new(PostgresRequestRepository::new(database.clone()));
+        let routes = RouteService::new(PostgresRouteRepository::new(database.clone()));
 
         Ok(Self {
             database,
@@ -81,6 +84,7 @@ impl Application {
             schemas,
             replay_protection,
             requests,
+            routes,
         })
     }
 
@@ -172,6 +176,10 @@ impl Application {
 
     pub const fn requests(&self) -> &RequestService<PostgresRequestRepository> {
         &self.requests
+    }
+
+    pub const fn routes(&self) -> &RouteService<PostgresRouteRepository> {
+        &self.routes
     }
 
     pub fn handshake_reconciler<T>(

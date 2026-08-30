@@ -79,6 +79,7 @@ mod tests {
             crate::kernel::subscriptions::SubscriptionId::new(),
             ActorId::new(),
             EventType::new("resource.created.v1").unwrap(),
+            crate::kernel::subscriptions::DeliveryMode::Inclusive,
             10,
             None,
         )

@@ -11,7 +11,7 @@ use infernal_law::kernel::handshakes::{
 };
 use infernal_law::kernel::identity::ActorKind;
 use infernal_law::kernel::instance_keys::{InstanceCredential, InstancePublicKey};
-use infernal_law::kernel::subscriptions::EventType;
+use infernal_law::kernel::subscriptions::{DeliveryMode, EventType};
 use infernal_law::wiring::Application;
 use r2d2_postgres::postgres::{Client, NoTls};
 
@@ -48,6 +48,7 @@ fn each_kernel_instance_reconciles_only_distinct_active_subscribed_instances() {
         .create(
             worker.id(),
             EventType::new("artifact.submitted.v1").unwrap(),
+            DeliveryMode::Inclusive,
             now,
         )
         .unwrap();
@@ -56,6 +57,7 @@ fn each_kernel_instance_reconciles_only_distinct_active_subscribed_instances() {
         .create(
             worker.id(),
             EventType::new("decision.requested.v1").unwrap(),
+            DeliveryMode::Inclusive,
             now,
         )
         .unwrap();

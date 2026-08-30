@@ -38,6 +38,8 @@ src/
 │   │                        # atomic nonce/request-ID replay persistence
 │   ├── postgres_request_repository.rs
 │   │                        # ILK-003 durable acceptance and audit
+│   ├── postgres_route_repository.rs
+│   │                        # idempotent ILK-003 route materialization
 │   ├── postgres_handshake_repository.rs
 │   │                        # challenge consumption and handshake history
 │   ├── postgres_subscribed_instance_discovery.rs
@@ -78,6 +80,8 @@ tests/
 ├── identity_contract.rs    # independently runnable ILK-001 contract
 ├── authority_contract.rs   # independently runnable ILK-002 contract
 ├── request_contract.rs     # independently runnable ILK-003 contract
+├── route_materialization_contract.rs
+│                            # independently runnable ILK-003 route contract
 ├── instance_keys_contract.rs
 │                            # per-instance key isolation/signature contract
 ├── instance_registry_contract.rs
@@ -118,6 +122,8 @@ tests/
 │                            # opt-in replay persistence/guard test
 ├── postgres_request_repository.rs
 │                            # opt-in ILK-003 durability/history test
+├── postgres_route_repository.rs
+│                            # opt-in ILK-003 route materialization test
 ├── postgres_communication_admission.rs
 │                            # opt-in admission administration/history test
 ├── postgres_authority_repository.rs
@@ -148,6 +154,7 @@ cargo test --test http_contract
 cargo test --test identity_contract
 cargo test --test authority_contract
 cargo test --test request_contract
+cargo test --test route_materialization_contract
 cargo test --test instance_keys_contract
 cargo test --test instance_registry_contract
 cargo test --test enrollment_contract
@@ -177,6 +184,7 @@ cargo test --test postgres_subscription_repository -- --ignored
 cargo test --test postgres_handshake_reconciler -- --ignored
 cargo test --test postgres_replay_protection -- --ignored
 cargo test --test postgres_request_repository -- --ignored
+cargo test --test postgres_route_repository -- --ignored
 cargo test --test postgres_communication_admission -- --ignored
 cargo test --test postgres_authority_repository -- --ignored
 cargo test --test postgres_governed_http_middleware -- --ignored

@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use infernal_law::kernel::identity::ActorId;
 use infernal_law::kernel::subscriptions::{
-    EventType, Subscription, SubscriptionError, SubscriptionId, SubscriptionRepository,
-    SubscriptionService,
+    DeliveryMode, EventType, Subscription, SubscriptionError, SubscriptionId,
+    SubscriptionRepository, SubscriptionService,
 };
 
 #[derive(Clone, Default)]
@@ -75,11 +75,26 @@ impl SubscriptionRepository for MemorySubscriptions {
             value.id(),
             value.service_id(),
             value.event_type().clone(),
+            value.delivery_mode(),
             value.created_at(),
             Some(disabled_at),
         )?;
         *value = disabled.clone();
         Ok(disabled)
+    }
+
+    fn find_active_by_event_type(
+        &self,
+        event_type: &EventType,
+    ) -> Result<Vec<Subscription>, SubscriptionError> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|value| value.event_type() == event_type && value.is_active())
+            .cloned()
+            .collect())
     }
 }
 
@@ -90,10 +105,10 @@ fn create_list_disable_and_resubscribe_preserve_history() {
     let event_type = EventType::new("resource.version-created.v1").unwrap();
 
     let first = subscriptions
-        .create(service_id, event_type.clone(), 10)
+        .create(service_id, event_type.clone(), DeliveryMode::Inclusive, 10)
         .unwrap();
     assert!(matches!(
-        subscriptions.create(service_id, event_type.clone(), 11),
+        subscriptions.create(service_id, event_type.clone(), DeliveryMode::Inclusive, 11),
         Err(SubscriptionError::DuplicateActive(id, event))
             if id == service_id && event == event_type
     ));
@@ -102,7 +117,7 @@ fn create_list_disable_and_resubscribe_preserve_history() {
     assert!(subscriptions.list_active(service_id).unwrap().is_empty());
 
     let second = subscriptions
-        .create(service_id, event_type.clone(), 30)
+        .create(service_id, event_type.clone(), DeliveryMode::Inclusive, 30)
         .unwrap();
     assert_ne!(second.id(), first.id());
     let history = subscriptions.list(service_id).unwrap();
@@ -118,7 +133,12 @@ fn service_ownership_and_disable_state_are_enforced() {
     let other_service = ActorId::new();
     let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
     let created = subscriptions
-        .create(owner, EventType::new("artifact.submitted.v1").unwrap(), 10)
+        .create(
+            owner,
+            EventType::new("artifact.submitted.v1").unwrap(),
+            DeliveryMode::Inclusive,
+            10,
+        )
         .unwrap();
 
     assert_eq!(
@@ -140,9 +160,53 @@ fn invalid_timestamps_fail_before_persistence() {
         subscriptions.create(
             ActorId::new(),
             EventType::new("event.created.v1").unwrap(),
+            DeliveryMode::Inclusive,
             -1,
         ),
         Err(SubscriptionError::InvalidTimestamp)
     );
     assert!(repository.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn find_active_by_event_type_matches_across_services_and_excludes_disabled() {
+    let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
+    let event_type = EventType::new("billing.invoice.submit").unwrap();
+    let first_service = ActorId::new();
+    let second_service = ActorId::new();
+
+    let first = subscriptions
+        .create(
+            first_service,
+            event_type.clone(),
+            DeliveryMode::Inclusive,
+            10,
+        )
+        .unwrap();
+    subscriptions
+        .create(
+            second_service,
+            event_type.clone(),
+            DeliveryMode::Inclusive,
+            11,
+        )
+        .unwrap();
+    subscriptions
+        .create(
+            ActorId::new(),
+            EventType::new("billing.invoice.cancel").unwrap(),
+            DeliveryMode::Inclusive,
+            12,
+        )
+        .unwrap();
+    subscriptions
+        .disable(first_service, first.id(), 20)
+        .unwrap();
+
+    let matches = subscriptions
+        .find_active_by_event_type(&event_type)
+        .unwrap();
+
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].service_id(), second_service);
 }

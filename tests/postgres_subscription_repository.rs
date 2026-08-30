@@ -5,7 +5,7 @@ use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use infernal_law::kernel::identity::{ActorId, ActorKind};
-use infernal_law::kernel::subscriptions::{EventType, SubscriptionError};
+use infernal_law::kernel::subscriptions::{DeliveryMode, EventType, SubscriptionError};
 use infernal_law::wiring::Application;
 use r2d2_postgres::postgres::{Client, NoTls};
 
@@ -22,12 +22,20 @@ fn subscription_history_survives_reconnection_and_rejects_destructive_mutation()
 
     let first = first_process
         .subscriptions()
-        .create(service.id(), event_type.clone(), now)
+        .create(
+            service.id(),
+            event_type.clone(),
+            DeliveryMode::Inclusive,
+            now,
+        )
         .unwrap();
     assert!(matches!(
-        first_process
-            .subscriptions()
-            .create(service.id(), event_type.clone(), now + 1),
+        first_process.subscriptions().create(
+            service.id(),
+            event_type.clone(),
+            DeliveryMode::Inclusive,
+            now + 1,
+        ),
         Err(SubscriptionError::DuplicateActive(id, event))
             if id == service.id() && event == event_type
     ));
@@ -37,8 +45,20 @@ fn subscription_history_survives_reconnection_and_rejects_destructive_mutation()
         .unwrap();
     let second = first_process
         .subscriptions()
-        .create(service.id(), event_type.clone(), now + 3)
+        .create(
+            service.id(),
+            event_type.clone(),
+            DeliveryMode::Inclusive,
+            now + 3,
+        )
         .unwrap();
+
+    let matching = first_process
+        .subscriptions()
+        .find_active_by_event_type(&event_type)
+        .unwrap();
+    assert_eq!(matching.len(), 1);
+    assert_eq!(matching[0].id(), second.id());
     drop(first_process);
 
     let second_process = Application::from_env().expect("application should reconnect");
@@ -58,6 +78,7 @@ fn subscription_history_survives_reconnection_and_rejects_destructive_mutation()
         second_process.subscriptions().create(
             unknown_service,
             EventType::new("unknown.service-event.v1").unwrap(),
+            DeliveryMode::Inclusive,
             now + 4,
         ),
         Err(SubscriptionError::UnknownService(unknown_service))
