@@ -108,14 +108,17 @@ scoping; MVP simply exercises a subset of it (marked inline below).
 - **Worker** — a service principal that consumes events or claims work for
   processing.
 - **Scheduler** (Taskmaster) — an ordinary, non-privileged service principal
-  that reads the kernel's eligible-route query and decides which eligible
-  route runs next and on which worker or node. It owns optimization policy
-  (ordering, priority, affinity, resource-class placement, capacity,
-  backpressure timing, retry timing); it holds no elevated database access
-  and cannot bypass claim arbitration. The kernel is its only source of
-  registered request, route, health/capacity-relay, and claim state — a
-  scheduler never receives that state from a worker directly or from any
-  other event source. See
+  that reads the kernel's eligible-route query and may recommend which
+  eligible work should run next and, optionally, where. It owns
+  optimization policy (ordering, priority, affinity, resource-class
+  placement, capacity, backpressure timing, retry timing); it holds no
+  elevated database access and cannot bypass claim arbitration —
+  recommending is not assigning: an eligible worker submits the actual
+  claim under its own authenticated identity, and the kernel alone
+  atomically arbitrates whether that claim succeeds. The kernel is its
+  only source of registered request, route, health/capacity-relay, and
+  claim state — a scheduler never receives that state from a worker
+  directly or from any other event source. See
   [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md)
   and [Section 9](#9-external-infrastructure-services).
 - **Policy evaluator** (Inquisitor) — an ordinary, non-privileged service
@@ -242,13 +245,15 @@ failed. When a subscription matches, the kernel idempotently creates or
 wakes the request route for that stable destination. The kernel's
 eligible-route query uses active subscription state to expose which
 incomplete routes are eligible; it does not select which one runs next or
-on which worker — that policy belongs to an external scheduler service
-(see [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md)).
-The work-claim contract then atomically arbitrates whichever claim a
-scheduler requests: authorized, still eligible, unclaimed, and
-fencing-current, or rejected. A completion is scoped to that route and
-records the subscription and worker responsible. It does not complete the
-parent request for any other destination.
+on which worker — recommending eligible work, and optionally where it
+should run, is scheduler policy, external to the kernel (see
+[ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md)).
+The work-claim contract then atomically arbitrates whichever claim an
+eligible worker submits under its own authenticated identity: authorized,
+still eligible, unclaimed, and fencing-current, or rejected. A completion
+is scoped to that route and records the subscription and worker
+responsible. It does not complete the parent request for any other
+destination.
 
 ### Transaction boundary
 
@@ -269,23 +274,8 @@ Depending on the operation, that state may include:
 - replay and idempotency state;
 - required audit evidence.
 
-Concretely, for an accepted mutating request this means the following
-effects MUST form one atomic transaction where applicable:
-
-1. validate identity, signature, freshness, replay, communication
-   admission, request shape, schema activation, authority, and
-   idempotency;
-2. persist the immutable request envelope and semantic fingerprint;
-3. apply fixed artifact-storage, routing, subscription, connection, or
-   work coordination effects;
-4. append required security, administration, and mediation audit records;
-5. append promised kernel or approved service-schema events (Future
-   Kernel — see [ILK-009](#ilk-009-events); no step of the MVP vertical
-   slice promises an event yet); and
-6. persist the idempotent result.
-
-The kernel reports success only after this transaction commits. Delivery
-of a committed event to a subscriber MAY occur asynchronously.
+The kernel reports success only after the required kernel-owned
+transaction commits.
 
 This rule applies only to kernel-owned state. It does NOT imply that
 domain artifact content, domain databases, search indexes, or other
@@ -333,10 +323,11 @@ path:
 7. The Request is durably persisted in PostgreSQL.
 8. A basic active inclusive subscription matches it.
 9. The kernel creates one durable route.
-10. An external scheduler can query eligible routes.
-11. The scheduler proposes a route/worker assignment.
-12. The kernel atomically arbitrates ownership through claims, leases, and
-    fencing.
+10. Taskmaster queries the kernel for eligible routes.
+11. Taskmaster may recommend which eligible work should run next.
+12. An eligible worker submits a claim using its own authenticated
+    identity, and the kernel atomically arbitrates ownership through
+    claims, leases, and fencing.
 13. The worker receives the governed work through the kernel.
 14. The worker returns completion/result state through the kernel.
 15. Required request, authority, route, claim, completion, and audit
@@ -361,9 +352,9 @@ it:
 | 7. Request is durably persisted in PostgreSQL | `PostgresRequestRepository` | `tests/postgres_request_repository.rs` (ignored, live-DB) |
 | 8. A basic active inclusive subscription matches it | `SubscriptionRepository::find_active_by_event_type` | `tests/subscription_contract.rs::find_active_by_event_type_matches_across_services_and_excludes_disabled` |
 | 9. Kernel creates one durable route | `SubscriptionRouter` → `RouteService::materialize` | `tests/route_materialization_contract.rs`, `tests/postgres_route_repository.rs` (ignored, live-DB) |
-| 10. External scheduler can query eligible routes | `GET /v1/routes/eligible` → `EligibleRouteQuery` | `tests/route_materialization_contract.rs`, `tests/work_claim_contract.rs`, colocated `eligible_route_routes` tests in `src/http.rs`, `tests/postgres_route_repository.rs`/`tests/postgres_work_claim_repository.rs` (ignored, live-DB) |
-| 11. Scheduler proposes a route/worker assignment | `POST /v1/routes/{route_id}/claims` | `tests/work_claim_contract.rs`, colocated `work_claim_routes` HTTP tests in `src/http.rs` |
-| 12. Kernel atomically arbitrates ownership (claims/leases/fencing) | `WorkClaimService::claim` | `tests/work_claim_contract.rs`, `tests/postgres_work_claim_repository.rs` (ignored, live-DB) |
+| 10. Taskmaster queries the kernel for eligible routes | `GET /v1/routes/eligible` → `EligibleRouteQuery` | `tests/route_materialization_contract.rs`, `tests/work_claim_contract.rs`, colocated `eligible_route_routes` tests in `src/http.rs`, `tests/postgres_route_repository.rs`/`tests/postgres_work_claim_repository.rs` (ignored, live-DB) |
+| 11. Taskmaster may recommend which eligible work should run next | Taskmaster's own scheduling policy — external to the kernel, no kernel API call ([ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md)) | `infernal-taskmaster-simple`'s own test suite (FIFO scheduling policy) |
+| 12. An eligible worker submits a claim under its own authenticated identity, and the kernel atomically arbitrates ownership (claims/leases/fencing) | `POST /v1/routes/{route_id}/claims` → `WorkClaimService::claim` | `tests/work_claim_contract.rs`, colocated `work_claim_routes` HTTP tests in `src/http.rs`, `tests/postgres_work_claim_repository.rs` (ignored, live-DB) |
 | 13. Worker receives the governed work through the kernel | `GET /v1/routes/{route_id}/request` → `RoutedRequestQuery` | `tests/route_materialization_contract.rs::find_returns_a_single_route_by_id_or_none_for_an_unknown_id`, colocated `routed_request_routes` tests in `src/http.rs`, `tests/postgres_route_repository.rs` (ignored, live-DB) |
 | 14. Worker returns completion/result state through the kernel | `POST /v1/claims/{id}/complete` | `tests/work_claim_contract.rs::completion_is_terminal_and_cannot_be_renewed_or_released_afterward` |
 | 15. Required evidence remains durable across restart | `protect_work_claim()` trigger + append-only tables | `tests/postgres_work_claim_repository.rs`'s `assert_database_guards`; see [Section 6](#6-mvp-failurerecovery-acceptance-tests) for the full-restart proof |
@@ -1161,10 +1152,10 @@ Acceptance criteria:
   the subscriber's runtime identity. **Kernel 1.0** (backlog matching).
 - The kernel's eligibility query returns incomplete routes filtered by
   active subscription, authorization, and handshake state, excluding
-  completed routes and routes protected by an active work claim. An
-  external scheduler service selects which eligible route to claim next
-  and for which worker; readiness and capacity are scheduler policy
-  inputs, not kernel filters (see
+  completed routes and routes protected by an active work claim.
+  Taskmaster may prioritize eligible work; an eligible worker claims the
+  route under its own authenticated identity. Readiness and capacity are
+  scheduler policy inputs, not kernel filters (see
   [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md)).
   **MVP — done for the minimum shape**: `GET /v1/routes/eligible`
   (`EligibleRouteQuery`, composing ILK-003's `list_for_destination` with
