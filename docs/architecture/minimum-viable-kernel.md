@@ -982,6 +982,10 @@ preserved in [Section 8](#8-future-kernel-kernel-10).
 
 **Scope: Split.**
 
+For `v0.1.0`, a subscription is the minimum durable declaration required
+for one service to express interest in governed Requests without the
+Request source knowing that service exists.
+
 **MVP**: create/list/disable of inclusive subscriptions, matching against
 subscriptions already active at submission time, and idempotent route
 materialization (all Complete today).
@@ -998,22 +1002,51 @@ and [Section 9](#9-external-infrastructure-services).
 - Implementation: `src/kernel/subscriptions.rs`
 - Independent contract test: `tests/subscription_contract.rs`
 
-Invariants:
+MVP invariants:
 
-- **MVP** — A service MUST be able to create, inspect, and disable its
-  subscriptions through kernel contracts.
-- **MVP** — A subscription MUST identify its stable service owner and one
-  or more approved request, event, artifact, or work types.
-- **MVP** — A request-receiving subscription MUST declare `exclusive` or
-  `inclusive` delivery semantics; an omitted or unknown mode MUST fail
-  closed.
+- **MVP** — A service MUST be able to create, inspect, and disable its own
+  subscriptions through authenticated kernel contracts.
+- **MVP** — An MVP subscription MUST identify its stable owning service.
+- **MVP** — An MVP subscription MUST identify the approved namespaced
+  Request/action contract it accepts.
+- **MVP** — An MVP subscription MUST use inclusive delivery semantics; an
+  omitted or unknown mode MUST fail closed.
+- **MVP** — A matching active subscription MUST cause the kernel to
+  idempotently materialize at most one route for the `(request,
+  destination service)` pair. (Enforced today by two invariants together:
+  materialization is keyed by `(request_id, subscription_id)`, and a
+  unique index permits at most one active subscription per `(service,
+  event_type)` — so at most one subscription, and hence at most one
+  route, can match a given request for a given destination.)
+- **MVP** — Disabling a subscription MUST prevent it from matching future
+  Requests without deleting its prior definition or routing history.
+- **MVP** — Subscription creation and disable operations MUST be
+  authorized and auditable.
+- **MVP** — A source service MUST NOT learn which subscriptions,
+  destination services, or runtime instances matched its Request.
+
+The MVP does NOT require:
+
+- exclusive consumer groups;
+- consumer-group identities;
+- generalized selectors;
+- predicate sets;
+- `all_of` semantics;
+- durable backlog cursors;
+- replay scanning;
+- subscription-triggered routing of pre-existing Requests;
+- sophisticated routing windows;
+- capacity-aware delivery;
+- production-hardened subscriber discovery.
+
+Those capabilities are classified separately as Future Kernel or External
+Infrastructure responsibilities, detailed as invariants below and in
+[Section 8](#8-future-kernel-kernel-10):
+
 - **Kernel 1.0** — An exclusive subscription MUST declare an approved
   consumer-group identity. All services in that group compete for one
   request/group route and one completion; failover reassigns that route
   rather than resubmitting the request.
-- **MVP** — An inclusive subscription MUST create an independent route for
-  every matching stable destination service within the request's routing
-  window.
 - **Kernel 1.0** — A subscription MAY require multiple typed state
   predicates. The minimum semantics MUST be `all_of`, evaluated from one
   consistent committed snapshot; every predicate must be true before a
@@ -1039,7 +1072,6 @@ Invariants:
 - **Kernel 1.0** — The kernel MUST use a durable subscription cursor or
   equivalent wakeup marker to find both new and pre-existing matching
   requests without loss.
-- **MVP** — Subscription changes MUST be authorized and audited.
 - **External infrastructure** — Pausing or deferring delivery for
   readiness, health, or capacity reasons is scheduler policy (ADR-0011)
   and MUST NOT delete or disable durable subscription state.
@@ -1048,6 +1080,10 @@ Invariants:
   mutual proof-of-possession handshake before delivering to an instance.
   (The discovery/handshake mechanism exists; production-hardened outbound
   transport is the remaining piece.)
+
+These Kernel 1.0 extensions MUST NOT turn subscriptions into a general
+business-rules language. Business-domain eligibility and reasoning remain
+domain-service responsibilities.
 
 Acceptance criteria:
 
