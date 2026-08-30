@@ -188,3 +188,46 @@ cluster that can access Podman's image store. For a remote cluster, publish the
 image to a registry and replace the image name before applying the manifests.
 The Deployment expects a Secret named `infernal-law-database` with a `url` key;
 the repository does not commit database credentials.
+
+### TLS
+
+The Deployment includes a `tls-proxy` sidecar (nginx) terminating TLS in
+front of the kernel's own plain-HTTP listener, exposed as the Service's
+`https` port (443). This exists because
+[`infernal-client-rs`](https://github.com/BenjaminGrandstaff/infernal-client-rs)'s
+outbound `SignedRequest` always dials `https://<authority>` — any caller
+using it (`infernal-taskmaster-simple`, `infernal-worker-simple`, a future
+policy evaluator call) needs a real TLS endpoint to reach, not the
+plain-HTTP `Service` alone. Signing itself is unaffected either way: the
+signature covers method/target URI/content digest/etc., not the transport;
+`k8s/base/tls-proxy-configmap.yaml` forwards the original `Host` header
+through unchanged (required so the kernel's own signature verification
+sees the authority the caller actually signed), and explicitly sets
+`proxy_http_version 1.1` (nginx's default is 1.0, which the kernel's
+minimal parser rejects outright).
+
+The certificate is not committed. Generate a self-signed one for local
+testing:
+
+```sh
+openssl req -x509 -newkey rsa:2048 -keyout infernal-law-tls.key \
+  -out infernal-law-tls.crt -days 365 -nodes \
+  -subj "/CN=infernal-law" \
+  -addext "basicConstraints=critical,CA:FALSE" \
+  -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+  -addext "extendedKeyUsage=serverAuth" \
+  -addext "subjectAltName=DNS:infernal-law"
+kubectl create secret tls infernal-law-tls \
+  --cert=infernal-law-tls.crt --key=infernal-law-tls.key
+```
+
+The `basicConstraints=CA:FALSE` and `subjectAltName` extensions are not
+optional extras — a plain `openssl req -x509` without them defaults to a
+certificate marked as its own CA with no SAN, which `rustls` (what
+`infernal-client-rs` uses) rejects outright with `CaUsedAsEndEntity`, a
+failure mode confirmed directly while building this. A caller that needs
+to trust this self-signed certificate (any consumer of
+`infernal-client-rs` that isn't `infernal-inquisitor-simple`, which
+verifies the kernel's identity a different way) needs the same certificate
+as an extra trust anchor — see `infernal-taskmaster-simple`'s and
+`infernal-worker-simple`'s own READMEs for `KERNEL_CA_CERT_PATH`.

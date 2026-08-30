@@ -3,5 +3,6 @@ kind: Kustomization
 resources:
   - service-account.yaml
   - token-review-rbac.yaml
+  - tls-proxy-configmap.yaml
   - deployment.yaml
   - service.yaml

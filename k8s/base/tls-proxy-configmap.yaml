@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: infernal-law-tls-proxy
+data:
+  default.conf: |
+    server {
+        listen 8443 ssl;
+
+        ssl_certificate /etc/nginx/tls/tls.crt;
+        ssl_certificate_key /etc/nginx/tls/tls.key;
+
+        # infernal-client-rs's signature base always includes
+        # https://<authority><path> as a covered component, and the
+        # kernel reconstructs the same value from the incoming request's
+        # Host header (src/kernel/service_requests.rs). $host is the
+        # original request's Host header (the authority the caller
+        # signed, e.g. "infernal-law"), stripped of any port -- it MUST
+        # reach the kernel unchanged, not nginx's own upstream address,
+        # or every signature verification fails.
+        location / {
+            proxy_pass http://127.0.0.1:8080;
+            proxy_set_header Host $host;
+            client_max_body_size 1m;
+            # nginx's default proxy_http_version is 1.0, but the kernel's
+            # minimal hand-rolled parser requires the request line to read
+            # exactly "HTTP/1.1" and rejects anything else as malformed --
+            # confirmed directly: without this, every proxied request
+            # failed to parse.
+            proxy_http_version 1.1;
+        }
+    }

@@ -69,6 +69,51 @@ spec:
             - name: kubernetes-reviewer
               mountPath: /var/run/secrets/infernal-law-kubernetes
               readOnly: true
+        # Terminates TLS in front of the kernel's own plain-HTTP listener.
+        # infernal-client-rs's outbound SignedRequest always dials
+        # https://<authority> (never plain HTTP), so any caller using it
+        # -- infernal-taskmaster-simple, infernal-worker-simple, or a
+        # future policy evaluator call -- needs a real TLS endpoint to
+        # reach, not just the plain-HTTP Service this Deployment exposed
+        # before. The signature itself is unaffected either way: it
+        # covers method/target_uri/content-digest/etc, not the transport,
+        # and target_uri's authority survives the proxy hop only because
+        # tls-proxy-configmap.yaml explicitly forwards the original Host
+        # header (see that file's comment).
+        - name: tls-proxy
+          image: docker.io/nginxinc/nginx-unprivileged:1.27-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+          volumeMounts:
+            - name: tls-proxy-config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+              readOnly: true
+            - name: tls-proxy-certificate
+              mountPath: /etc/nginx/tls
+              readOnly: true
+            - name: tls-proxy-cache
+              mountPath: /var/cache/nginx
+            - name: tls-proxy-run
+              mountPath: /var/run
+            - name: tls-proxy-tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
       volumes:
         - name: kubernetes-reviewer
           projected:
@@ -82,4 +127,21 @@ spec:
                   items:
                     - key: ca.crt
                       path: ca.crt
+        - name: tls-proxy-config
+          configMap:
+            name: infernal-law-tls-proxy
+        # Not committed: create with, for example,
+        #   kubectl create secret tls infernal-law-tls \
+        #     --cert=tls.crt --key=tls.key
+        # (see README's Kubernetes section for the full openssl command
+        # that generates a self-signed certificate for local testing).
+        - name: tls-proxy-certificate
+          secret:
+            secretName: infernal-law-tls
+        - name: tls-proxy-cache
+          emptyDir: {}
+        - name: tls-proxy-run
+          emptyDir: {}
+        - name: tls-proxy-tmp
+          emptyDir: {}
       terminationGracePeriodSeconds: 10

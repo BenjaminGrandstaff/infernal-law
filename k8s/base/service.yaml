@@ -12,4 +12,13 @@ spec:
       port: 80
       targetPort: http
       protocol: TCP
+    # infernal-client-rs's SignedRequest always dials https://<authority>
+    # with no explicit port, which resolves to 443 -- callers using it
+    # (infernal-taskmaster-simple, infernal-worker-simple, and so on) need
+    # this port to reach the tls-proxy sidecar (deployment.yaml), not the
+    # kernel's own plain-HTTP listener directly.
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP
   type: ClusterIP
