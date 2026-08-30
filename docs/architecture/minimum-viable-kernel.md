@@ -1253,9 +1253,12 @@ Implementation status:
   fencing token as a deliberate simplification).
 - External infrastructure: any scheduling policy (which eligible route a
   worker should claim next, priority, capacity) — deliberately out of
-  kernel scope (ADR-0011) — and wiring a reference worker
-  (`infernal-taskmaster-simple`, still an unimplemented stub) to actually
-  call these routes.
+  kernel scope (ADR-0011). `infernal-taskmaster-simple`'s FIFO scheduler
+  now calls the eligible-route query and proposes claims against it (its
+  own signing/parsing/FIFO logic is tested there, independent of a live
+  kernel); a reference worker to actually receive and complete the
+  claimed work is the one piece still unwired — see
+  [Section 7](#7-current-mvp-implementation-status).
 
 ### ILK-012: Idempotency
 
@@ -1364,19 +1367,19 @@ release/complete with fencing *and* the eligible-route query
 
 What remains before tagging `v0.1.0`:
 
-1. **Wire a simple external Taskmaster against the eligible-route query**
-   — `infernal-taskmaster-simple` is currently an eight-line stub; it needs
-   enough logic to call `GET /v1/routes/eligible` and propose a claim.
-2. **Wire a simple worker through claim → execution → completion** — using
+1. **Wire a simple worker through claim → execution → completion** — using
    the existing `POST /v1/routes/{route_id}/claims`,
    `GET /v1/routes/{route_id}/request`, and `POST /v1/claims/{id}/complete`
-   routes, all already MVP-complete.
-3. **Close any remaining transaction/idempotency gaps exposed by that
+   routes, all already MVP-complete. `infernal-taskmaster-simple`'s FIFO
+   scheduler already calls the eligible-route query and proposes claims
+   against it; nothing exists yet on the other end of a claimed route to
+   actually receive and complete the work.
+2. **Close any remaining transaction/idempotency gaps exposed by that
    end-to-end path** — the individual pieces (acceptance, materialization,
    eligible-route query, claim, routed-request read, completion) are each
    already transactional or a plain read of already-committed state; this
    step is about confirming that, end-to-end.
-4. **Run the required retry, denial, crash/recovery, concurrency, and
+3. **Run the required retry, denial, crash/recovery, concurrency, and
    fencing tests** ([Section 6](#6-mvp-failurerecovery-acceptance-tests))
    as one continuous scenario, including the restart proof that today only
    exists per-capability.
@@ -1580,10 +1583,15 @@ for Taskmaster to make proposals — the eligible-route query
 complete contract (also MVP-complete) — and remains the final arbiter of
 eligibility and ownership. See
 [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md).
-`infernal-taskmaster-simple` is the reference implementation and is
-currently an unimplemented stub; wiring a minimal version of it against
-the eligible-route query is on the `v0.1.0` punch list (Section 7), but
-the scheduling *logic* itself is never kernel scope.
+`infernal-taskmaster-simple` is the reference implementation: its FIFO
+scheduler signs and sends `GET /v1/routes/eligible` and
+`POST /v1/routes/{route_id}/claims` calls using its own long-lived
+instance credential, the mirror image of how the kernel signs its own
+call to a policy evaluator, and treats a lost claim race (`409`) as an
+ordinary outcome, not an error — proven with its own signing/parsing/FIFO
+tests, independent of a live kernel connection. What remains is wiring a
+reference worker on the other end of a claimed route (Section 7); the
+scheduling *logic* itself is never kernel scope.
 
 ### Inquisitor (external policy evaluator)
 
@@ -1896,10 +1904,11 @@ the affected `ILK-*` requirements.
 
 ### Remaining work before `v0.1.0 — Minimum Viable Kernel`
 
-- Wire `infernal-taskmaster-simple` to query eligible routes and propose
-  claims.
 - Wire one simple worker through receive → execute → complete, using the
   now-complete `GET /v1/routes/{route_id}/request` to receive.
+  `infernal-taskmaster-simple` already queries eligible routes and
+  proposes claims; nothing yet exists on the worker side of a claimed
+  route.
 - Confirm required request/route/claim/completion/audit state is durably
   recorded across that end-to-end path (already true per-capability; this
   is an end-to-end confirmation, not new invariants).
