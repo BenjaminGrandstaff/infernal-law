@@ -67,6 +67,11 @@ const MAX_HEADER_BYTES: usize = 8 * 1024;
 pub const MAX_ENROLLMENT_BODY_BYTES: usize = 40 * 1024;
 const POLICY_EVALUATOR_AUTHORITY_ENV: &str = "POLICY_EVALUATOR_AUTHORITY";
 const POLICY_EVALUATOR_ID_ENV: &str = "POLICY_EVALUATOR_ID";
+/// Path to a PEM-encoded certificate authority to trust in addition to the
+/// default public root store, for a policy evaluator reachable only behind
+/// a private or self-signed certificate. Optional: an evaluator with an
+/// ordinary publicly-trusted certificate needs no configuration here.
+const POLICY_EVALUATOR_CA_CERT_PATH_ENV: &str = "POLICY_EVALUATOR_CA_CERT_PATH";
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Response {
@@ -848,8 +853,16 @@ fn policy_evaluator_from_env(
         .ok()
         .and_then(|value| value.parse().ok())
         .ok_or_else(unavailable)?;
+    let evaluator_ca_cert = match env::var(POLICY_EVALUATOR_CA_CERT_PATH_ENV) {
+        Ok(path) => Some(std::fs::read(&path).map_err(|_| unavailable())?),
+        Err(_) => None,
+    };
     application
-        .authority_service(evaluator_authority, evaluator_id)
+        .authority_service(
+            evaluator_authority,
+            evaluator_id,
+            evaluator_ca_cert.as_deref(),
+        )
         .map_err(|_| unavailable())
 }
 

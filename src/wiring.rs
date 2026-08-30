@@ -155,6 +155,7 @@ impl Application {
         &self,
         evaluator_authority: impl Into<String>,
         evaluator_id: ActorId,
+        evaluator_ca_cert_pem: Option<&[u8]>,
     ) -> Result<
         AuthorityService<
             PostgresAuthorityRepository,
@@ -163,7 +164,14 @@ impl Application {
         >,
         AuthorityError,
     > {
-        let evaluator = HttpPolicyEvaluator::new(&self.instance_credential, evaluator_authority)?;
+        let evaluator = match evaluator_ca_cert_pem {
+            Some(pem) => HttpPolicyEvaluator::with_extra_root_certificate(
+                &self.instance_credential,
+                evaluator_authority,
+                pem,
+            )?,
+            None => HttpPolicyEvaluator::new(&self.instance_credential, evaluator_authority)?,
+        };
         let repository = PostgresAuthorityRepository::new(self.database.clone());
         Ok(AuthorityService::new(
             repository.clone(),

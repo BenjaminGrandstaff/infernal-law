@@ -40,6 +40,26 @@ impl<'a> HttpPolicyEvaluator<'a> {
             authority: authority.into(),
         })
     }
+
+    /// Like [`HttpPolicyEvaluator::new`], but additionally trusts
+    /// `extra_root_certificate_pem` -- for an evaluator reachable only
+    /// behind a private or self-signed certificate authority, which this
+    /// crate's default public root store would otherwise reject. Mirrors
+    /// `KernelClient::with_extra_root_certificate` in the reference
+    /// services on the other side of this same call.
+    pub fn with_extra_root_certificate(
+        credential: &'a InstanceCredential,
+        authority: impl Into<String>,
+        extra_root_certificate_pem: &[u8],
+    ) -> Result<Self, AuthorityError> {
+        let client = Client::with_extra_root_certificate(extra_root_certificate_pem)
+            .map_err(|error| AuthorityError::Evaluator(error.to_string()))?;
+        Ok(Self {
+            client,
+            credential,
+            authority: authority.into(),
+        })
+    }
 }
 
 impl PolicyEvaluator for HttpPolicyEvaluator<'_> {
