@@ -1421,18 +1421,50 @@ rejects outright as `CaUsedAsEndEntity`. With both fixed,
 real signed HTTPS calls to the kernel through the sidecar and receive its
 correct, well-formed `401` for an identity that is not yet enrolled —
 proving the entire transport/HTTP/signature-verification pipeline works,
-with only the enrollment step itself (below) remaining as genuine
-infrastructure, not code.
+with only the enrollment step itself remaining as genuine infrastructure,
+not code.
+
+That has since been completed too: `infernal-client-rs` now implements
+ADR-0008's candidate side (`EnrollmentSubmission`,
+`Client::submit_enrollment`), proven wire-compatible with the kernel's own
+`EnrollmentService` by a dedicated cross-crate test
+(`tests/enrollment_wire_compatibility.rs`), and both reference services
+perform it at startup when configured with a challenge. Running that for
+real against the same kind cluster — the only time `/v1/enrollments` has
+ever been exercised end to end — found and fixed one more real bug: the
+kernel's own `kubernetes-reviewer` projected volume mounted `ca.crt` at
+mode `0400` owned by `root`, unreadable by the container's own non-root
+user, so `KubernetesTokenReviewer::from_env()` failed closed with a
+generic "enrollment could not be completed" every time (fixed with
+`fsGroup: 65532` in the kernel's Pod `securityContext`). It also surfaced
+that a signed call passing authentication still needs its identity's
+`service_communication_admission` row explicitly enabled (ILK's
+communication-admission gate, administered the same out-of-band way as
+grants and schema activation) before any governed route — including
+`GET /v1/routes/eligible` — will do anything but `403`.
+
+With both fixed and a real challenge issued out-of-band (there is no
+self-service HTTP call for requesting one — see
+`infernal_client::EnrollmentSubmission`'s own documentation for why),
+`infernal-taskmaster-simple` and `infernal-worker-simple` completed a real
+ADR-0008 enrollment against the live TokenReview API, then polled
+`GET /v1/routes/eligible` successfully and continuously with no further
+authentication or admission errors. This is the first time any of
+signature verification, TokenReview, challenge consumption, communication
+admission, and instance registration have all been proven together
+end to end.
 
 What remains before tagging `v0.1.0` is finishing that validation, not new
 capability:
 
-1. **Complete real ADR-0008 Kubernetes TokenReview enrollment** for the
-   reference services' identities — the TLS layer is done and verified;
-   this is the last piece standing between the confirmed-working transport
-   and one real signed round trip — then run the whole path — submit,
-   materialize, claim, read, complete — as one real signed round trip end
-   to end.
+1. ~~Complete real ADR-0008 Kubernetes TokenReview enrollment for the
+   reference services' identities~~ — **done and verified above.** What is
+   still open is running the *rest* of the path — submit, materialize,
+   claim, read, complete — as one real signed round trip: nothing in this
+   ecosystem yet submits a real signed `POST /v1/requests` (both reference
+   services are eligible-route *consumers*, not request *submitters*), so
+   this needs one more enrolled test identity and an active inclusive
+   subscription before it can be exercised for real.
 2. **Close any remaining transaction/idempotency gaps exposed by that
    end-to-end path** — the individual pieces (acceptance, materialization,
    eligible-route query, claim, routed-request read, completion) are each
@@ -1982,17 +2014,17 @@ deploy into a real Kubernetes cluster, and start correctly; the full
 live-Postgres test suite has actually been run against real PostgreSQL
 and passes. What is left is finishing that validation, not new capability:
 
-- Complete real ADR-0008 Kubernetes TokenReview enrollment for the
-  reference services' identities, then run the whole path — submit,
-  materialize, claim, read, complete — as one real signed round trip. An
-  nginx sidecar now terminates TLS in front of the kernel's Kubernetes
-  `Service` (`infernal-client-rs`'s outbound signed calls always dial
-  `https://`, and the `Service` did not previously terminate TLS); this
-  has been verified end to end — `infernal-taskmaster-simple` and
-  `infernal-worker-simple` complete real signed HTTPS calls through it
-  and receive the kernel's correct `401` for an identity that isn't yet
-  enrolled — so enrollment is the only piece left before a full round
-  trip.
+- Run the request-facing half of the vertical slice — submit, materialize,
+  claim, read, complete — as one real signed round trip. TLS (an nginx
+  sidecar in front of the kernel's Kubernetes `Service`) and ADR-0008
+  enrollment are both done and verified end to end against a real kind
+  cluster: `infernal-taskmaster-simple` and `infernal-worker-simple`
+  complete real signed HTTPS calls, enroll a fresh instance key against
+  the live TokenReview API, and then poll `GET /v1/routes/eligible`
+  successfully and continuously. What has not yet been exercised for real
+  is the submitting side: nothing in this ecosystem yet performs a signed
+  `POST /v1/requests`, so completing this needs one more enrolled test
+  identity and an active inclusive subscription.
 - Confirm required request/route/claim/completion/audit state is durably
   recorded across that end-to-end path (already true per-capability,
   proven against live PostgreSQL; this is a confirmation that it holds
