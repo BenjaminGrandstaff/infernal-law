@@ -368,7 +368,7 @@ is deferred — its full text lives in
 
 | ID | Capability | Scope for v0.1.0 |
 | --- | --- | --- |
-| ILK-001 | Identity | **MVP Kernel** |
+| ILK-001 | Identity | **Split** — stable/instance identity, per-instance signing, authenticated signed requests, freshness/replay protection, and attribution are MVP (all done); continuous discovery, hardened proof-of-possession renewal, multi-replica correctness, richer key rotation, and hardened reconciliation/recovery are Kernel 1.0 |
 | ILK-002 | Authority | **Split** — request-acceptance authority is MVP; per-route re-authorization and schema-lifecycle administration UI are Kernel 1.0 |
 | ILK-003 | Requests | **Split** — immutable durable requests, inclusive-only route materialization, and a destination-scoped read of request content are MVP (all done); correlation, exclusive groups, route history, and backlog matching are Kernel 1.0 |
 | ILK-004 | Versions | **MVP Kernel** (the append-only/immutability invariant itself; administrative lifecycle workflow is external — see ILK-002) |
@@ -384,23 +384,58 @@ is deferred — its full text lives in
 
 ### ILK-001: Identity
 
-**Scope: MVP Kernel** (in full).
+**Scope: Split.**
+
+The MVP requires enough identity machinery to prove that every participant
+in the governed-work vertical slice acts under its own authenticated
+authority.
+
+**MVP**: stable service identity, unique per-instance identity and signing
+credentials, authenticated signed kernel requests, freshness/replay
+protection, and attribution of accepted Requests and completed work to
+the responsible service, instance, and key (all Complete today).
+
+**Kernel 1.0**: continuous service-instance discovery, production-hardened
+proof-of-possession renewal, multi-replica kernel identity correctness,
+richer key rotation/lifecycle administration, and hardened instance
+reconciliation/recovery behavior. These remain kernel security
+responsibilities, but they do not gate the first governed-work vertical
+slice unless explicitly exercised by the MVP acceptance tests.
 
 - Implementation: `src/kernel/identity.rs`
 - Independent contract test: `tests/identity_contract.rs`
 
 Invariants:
 
-- Every non-public request or administrative action MUST be attributable
-  to exactly one authenticated service or administrator and verified
-  credential.
-- Every running service instance MUST have a unique instance ID and
-  freshly generated keypair; no private key may be shared with another
-  instance or persisted outside its signing process.
-- Identity IDs MUST remain stable even if display names or credentials
-  change.
-- Worker identities MUST be represented as a service role or profile.
-- The kernel MUST NOT accept user credentials as kernel credentials.
+- **MVP** — Every non-public request or administrative action MUST be
+  attributable to exactly one authenticated service or administrator and
+  verified credential.
+- **MVP** — Every running service instance MUST have a unique instance ID
+  and freshly generated keypair; no private key may be shared with
+  another instance or persisted outside its signing process.
+- **MVP** — Identity IDs MUST remain stable even if display names or
+  credentials change.
+- **MVP** — Worker identities MUST be represented as a service role or
+  profile.
+- **MVP** — The kernel MUST NOT accept user credentials as kernel
+  credentials.
+- **MVP** — Every signed kernel request MUST be authenticated and MUST be
+  rejected as stale or replayed outside a bounded freshness window (see
+  ILK-003's replay-protection acceptance criteria for the mechanism).
+- **MVP** — Every accepted Request and completed unit of work MUST be
+  attributable to the specific service, instance, and key responsible.
+- **Kernel 1.0** — Service-instance discovery MUST run continuously, not
+  only at enrollment or handshake time.
+- **Kernel 1.0** — Proof-of-possession renewal MUST use production-hardened
+  transport (today's signed lease-renewal transport is not yet hardened
+  for that).
+- **Kernel 1.0** — Kernel identity behavior (for example
+  `GET /v1/kernel-identity`) MUST remain correct when multiple kernel
+  replicas are running.
+- **Kernel 1.0** — Key rotation and identity lifecycle administration MUST
+  support richer operations than today's generate-once-per-process model.
+- **Kernel 1.0** — Instance reconciliation and recovery behavior MUST be
+  hardened for production failure modes.
 
 Acceptance criteria:
 
@@ -442,9 +477,13 @@ Implementation status:
   context, and sanitized fail-closed responses.
 - Complete: ILK-002 authority and implemented governed subscription/
   request/route/claim handlers behind the middleware.
-- Future Kernel: signed lease-renewal transport; correctness under
-  multiple kernel replicas for `GET /v1/kernel-identity` (see
-  [Section 8](#8-future-kernel-kernel-10)).
+- Future Kernel: not started — production-hardened proof-of-possession
+  renewal transport (today's signed lease-renewal transport is not yet
+  hardened for that); correctness under multiple kernel replicas for
+  `GET /v1/kernel-identity`; continuous (not just enrollment-time)
+  service-instance discovery; richer key rotation/lifecycle
+  administration; and hardened instance reconciliation/recovery behavior
+  (see [Section 8](#8-future-kernel-kernel-10)).
 
 See the [direct service protocol](direct-service-protocol.md) and
 [ADR-0003](decisions/0003-direct-signed-service-rest.md).
