@@ -61,7 +61,7 @@ fn authority_grants_are_administered_out_of_band_and_read_by_matching_facts() {
     let artifact_schema = repository
         .publish(
             SchemaKind::Artifact,
-            SchemaName::new("billing.invoice").unwrap(),
+            SchemaName::new("test.authority-grants").unwrap(),
             source.id(),
             ContentDigest::from_bytes([9; 32]),
             1,
@@ -70,7 +70,7 @@ fn authority_grants_are_administered_out_of_band_and_read_by_matching_facts() {
     let permission_policy_schema = repository
         .publish(
             SchemaKind::PermissionPolicy,
-            SchemaName::new("billing.invoice").unwrap(),
+            SchemaName::new("test.authority-grants").unwrap(),
             source.id(),
             ContentDigest::from_bytes([10; 32]),
             1,
@@ -302,7 +302,7 @@ fn schema_versions_are_published_by_the_repository_and_administered_out_of_band(
         )
         .unwrap();
     let repository = PostgresAuthorityRepository::new(application.database().clone());
-    let name = SchemaName::new("billing.invoice").unwrap();
+    let name = SchemaName::new("test.authority-schema-versions").unwrap();
 
     let first = repository
         .publish(
@@ -451,7 +451,7 @@ fn authorize_durably_records_every_decision_and_history_is_append_only() {
     let artifact_schema = repository
         .publish(
             SchemaKind::Artifact,
-            SchemaName::new("billing.invoice").unwrap(),
+            SchemaName::new("test.authority-decisions").unwrap(),
             source.id(),
             ContentDigest::from_bytes([11; 32]),
             1,
@@ -460,7 +460,7 @@ fn authorize_durably_records_every_decision_and_history_is_append_only() {
     let permission_policy_schema = repository
         .publish(
             SchemaKind::PermissionPolicy,
-            SchemaName::new("billing.invoice").unwrap(),
+            SchemaName::new("test.authority-decisions").unwrap(),
             source.id(),
             ContentDigest::from_bytes([12; 32]),
             1,

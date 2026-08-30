@@ -160,7 +160,7 @@ SET search_path = pg_catalog
 AS $$
 DECLARE
     existing_audit public.authority_schema_status_audit%ROWTYPE;
-    current_schema public.authority_schema_versions%ROWTYPE;
+    existing_version public.authority_schema_versions%ROWTYPE;
 BEGIN
     IF requested_administrator_identity IS NULL
        OR char_length(btrim(requested_administrator_identity)) NOT BETWEEN 1 AND 200
@@ -184,7 +184,7 @@ BEGIN
         RETURN;
     END IF;
 
-    SELECT * INTO current_schema
+    SELECT * INTO existing_version
     FROM public.authority_schema_versions
     WHERE schema_version_id = requested_schema_version_id
     FOR UPDATE;
@@ -199,23 +199,23 @@ BEGIN
         RAISE EXCEPTION 'authority schema version was not found';
     END IF;
 
-    IF current_schema.status IN ('superseded', 'retired') THEN
+    IF existing_version.status IN ('superseded', 'retired') THEN
         INSERT INTO public.authority_schema_status_audit
             (schema_version_id, old_status, new_status, outcome,
              administrator_identity, reason, correlation_id, recorded_at)
         VALUES
-            (requested_schema_version_id, current_schema.status, requested_status,
+            (requested_schema_version_id, existing_version.status, requested_status,
              'rejected_terminal', btrim(requested_administrator_identity),
              btrim(requested_reason), requested_correlation_id, requested_changed_at);
-        RAISE EXCEPTION 'authority schema version status % is terminal', current_schema.status;
+        RAISE EXCEPTION 'authority schema version status % is terminal', existing_version.status;
     END IF;
 
-    IF current_schema.status = requested_status THEN
+    IF existing_version.status = requested_status THEN
         INSERT INTO public.authority_schema_status_audit
             (schema_version_id, old_status, new_status, outcome,
              administrator_identity, reason, correlation_id, recorded_at)
         VALUES
-            (requested_schema_version_id, current_schema.status, requested_status, 'no_op',
+            (requested_schema_version_id, existing_version.status, requested_status, 'no_op',
              btrim(requested_administrator_identity), btrim(requested_reason),
              requested_correlation_id, requested_changed_at);
         RETURN QUERY SELECT requested_status, requested_changed_at, 'no_op'::text;
@@ -236,7 +236,7 @@ BEGIN
         (schema_version_id, old_status, new_status, outcome,
          administrator_identity, reason, correlation_id, recorded_at)
     VALUES
-        (requested_schema_version_id, current_schema.status, requested_status, 'changed',
+        (requested_schema_version_id, existing_version.status, requested_status, 'changed',
          btrim(requested_administrator_identity), btrim(requested_reason),
          requested_correlation_id, requested_changed_at);
 

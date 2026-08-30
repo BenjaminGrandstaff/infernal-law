@@ -33,8 +33,9 @@ const MATCHING_GRANTS_SQL: &str = "SELECT grant_id::text, source_service_id::tex
       AND valid_from <= $7 \
       AND (valid_until IS NULL OR valid_until > $7)";
 
-const PUBLISH_SCHEMA_VERSION_SQL: &str = "SELECT * FROM publish_authority_schema_version( \
-    $1::text::uuid, $2, $3, $4::text::uuid, $5, $6)";
+const PUBLISH_SCHEMA_VERSION_SQL: &str = "SELECT schema_version_id::text, kind, name, version, \
+        owner_service_id::text, content_digest, predecessor_id::text, published_at, status \
+    FROM publish_authority_schema_version($1::text::uuid, $2, $3, $4::text::uuid, $5, $6)";
 
 const FIND_SCHEMA_VERSION_SQL: &str = "SELECT schema_version_id::text, kind, name, version, \
         owner_service_id::text, content_digest, predecessor_id::text, published_at, status \
