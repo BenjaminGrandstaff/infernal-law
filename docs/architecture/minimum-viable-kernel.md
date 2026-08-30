@@ -1159,8 +1159,13 @@ Acceptance criteria:
   [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md)).
   **MVP — done for the minimum shape**: `GET /v1/routes/eligible`
   (`EligibleRouteQuery`, composing ILK-003's `list_for_destination` with
-  ILK-011's `active_route_ids`) returns the caller's own materialized
-  routes that have no current, unexpired active claim. It does not
+  ILK-011's `active_route_ids` and `completed_route_ids`) returns the
+  caller's own materialized routes that have no current, unexpired active
+  claim and have never been completed. The completed-route exclusion was
+  a real, confirmed-live gap until fixed: `active_route_ids` alone only
+  ever looked at whether a claim was *currently* active, and a completed
+  claim is neither active nor absent, so a completed route looked exactly
+  like a plain unclaimed one and stayed eligible forever. It does not
   re-check subscription-active or handshake state at query time (a route
   only exists because both were true at materialization time) — doing so
   is a **Kernel 1.0** refinement, not a gap in the query existing at all.
@@ -1308,8 +1313,14 @@ Implementation status:
   `RouteNotFound` if the route does not exist or is not assigned to the
   caller (indistinguishable to the caller, matching how disabling another
   service's subscription looks identical to disabling one that does not
-  exist), and as `AlreadyClaimed` if a current, unexpired claim exists;
-  otherwise it supersedes whatever claim previously existed.
+  exist), as `AlreadyClaimed` if a current, unexpired claim exists, and as
+  `AlreadyCompleted` if the route's latest claim already reached the
+  terminal `Completed` status — checked independent of lease timing, since
+  a route's completion is permanent and a completed claim would otherwise
+  look identical to an ordinary expired one once enough time passed
+  (confirmed live: without this check, a completed route was reclaimable
+  indefinitely). Otherwise it supersedes whatever claim previously
+  existed.
   `renew`/`release`/`complete` fail as `Fenced` for a stale holder —
   including one that presents a fencing token that was current but has
   since been superseded — exactly like a stale holder losing a lease.
@@ -1331,12 +1342,17 @@ Implementation status:
 - Complete: the eligible-route query — `GET /v1/routes/eligible`, backed
   by `EligibleRouteQuery` in `src/http.rs`. It composes
   `RouteRepository::list_for_destination` (ILK-003) with
-  `WorkClaimRepository::active_route_ids` (ILK-011, a bulk "which of these
-  routes have a live claim" read) without either kernel module depending
-  on the other's repository — the same compositional pattern
-  `SubscriptionRouter` uses to bridge ILK-010 and ILK-003. The destination
-  queried is always the caller's own verified identity, never a request
-  parameter, so a caller can only ever see its own eligible routes; it
+  `WorkClaimRepository::active_route_ids` and `completed_route_ids`
+  (ILK-011, bulk "which of these routes have a live claim" and "which of
+  these routes have ever been completed" reads) without either kernel
+  module depending on the other's repository — the same compositional
+  pattern `SubscriptionRouter` uses to bridge ILK-010 and ILK-003. Both
+  exclusions are required: confirmed live, `active_route_ids` alone left
+  a completed route eligible forever, since completion is neither
+  "active" nor absent from claim history the way an ordinary lease
+  expiry is. The destination queried is always the caller's own verified
+  identity, never a request parameter, so a caller can only ever see its
+  own eligible routes; it
   requires no separate ILK-002 authority decision, matching every other
   read of the caller's own data (`GET /v1/subscriptions`,
   `GET /v1/requests/{id}`). Proven at the domain level
@@ -1579,14 +1595,32 @@ capability:
    (see that test file's own module documentation for why) — composing
    them in too would duplicate coverage without adding a new chained
    proof, not close a real gap.
-4. Still open, but genuine infrastructure rather than kernel code: nothing
-   in this ecosystem yet performs a real signed `POST /v1/requests` end to
-   end the way `infernal-taskmaster-simple`/`infernal-worker-simple` now
-   perform real signed `GET /v1/routes/eligible` calls — both are eligible-
-   route *consumers*, not request *submitters*. Exercising the full signed
-   HTTP path for submission (as opposed to the service-layer proof above)
-   would need one more enrolled test identity and an active inclusive
-   subscription.
+4. ~~Nothing in this ecosystem yet performs a real signed
+   `POST /v1/requests` end to end~~ — **done and verified above.** A
+   one-off enrolled test identity submitted a real signed request through
+   the full live stack (TLS, ADR-0008 enrollment, ILK-002 authority via a
+   real Inquisitor call, materialization, claim, reclaim after lease
+   expiry, fencing, completion, and a kernel restart partway through) and
+   Postgres showed exactly the expected end state: one request, one
+   route, a two-entry claim history (one expired, one completed), and
+   full audit/decision evidence. This is also what closed two further
+   real gaps, both fixed and reverified: the kernel's own outbound
+   ADR-0013 evaluator call needed the same TLS treatment as its inbound
+   listener (`infernal-inquisitor-simple` now runs the same tls-proxy
+   sidecar), and `POLICY_EVALUATOR_AUTHORITY`/`POLICY_EVALUATOR_ID` were
+   never actually present in the tracked kernel manifest, only ever set
+   ad hoc during live testing.
+
+   This same exercise also found a genuine correctness bug, since fixed:
+   a completed route was reclaimable *indefinitely*. With nothing
+   competing for it, a worker reclaimed and re-completed the same
+   already-completed route repeatedly, minting a new, strictly higher
+   fencing token each time, directly contradicting ILK-010's own
+   "excluding completed routes" requirement and ILK-011's single-
+   completion invariant. `WorkClaimRepository::claim` now rejects any
+   further claim once a route's latest claim is `Completed`, independent
+   of lease timing, and the eligible-route query excludes completed
+   routes via a new `completed_route_ids` alongside `active_route_ids`.
 
 See the [completion checklist](#remaining-work-before-v010-minimum-viable-kernel)
 at the end of this document for the same list in one place.
@@ -2117,36 +2151,38 @@ the affected `ILK-*` requirements.
 ### Remaining work before `v0.1.0 — Minimum Viable Kernel`
 
 Every kernel capability and reference service the vertical slice needs is
-code-complete: `infernal-taskmaster-simple` queries eligible routes and
-proposes claims, and `infernal-worker-simple` claims its own eligible
-work, reads the request behind it, and completes it. All four services
-(the kernel plus all three reference services) build as containers,
-deploy into a real Kubernetes cluster, and start correctly; the full
-live-Postgres test suite has actually been run against real PostgreSQL
-and passes. What is left is finishing that validation, not new capability:
+code-complete, and the full vertical slice has now been proven live,
+end to end, against a real Kubernetes cluster — not just per-capability.
+This list is entirely **Done**:
 
-- Done: request/route/claim/completion state durably holds together
-  across one request's whole lifetime, including a real kernel restart
-  mid-scenario, and the required retry/crash-recovery/fencing tests are
-  chained into that same scenario
-  (`tests/vertical_slice_continuity_contract.rs`, live PostgreSQL).
-  Denial and same-route concurrent-claim racing are intentionally proven
-  separately, not re-composed into this scenario — see Section 7's
-  numbered list for why.
-- Done: TLS (an nginx sidecar in front of the kernel's Kubernetes
-  `Service`) and ADR-0008 enrollment, verified end to end against a real
-  kind cluster — `infernal-taskmaster-simple` and `infernal-worker-simple`
-  complete real signed HTTPS calls, enroll a fresh instance key against
-  the live TokenReview API, and poll `GET /v1/routes/eligible`
-  successfully and continuously.
-- Still open, and genuine infrastructure rather than kernel code: running
-  the request-*submitting* half of the vertical slice as a real signed
-  HTTP round trip. Both reference services are eligible-route
-  *consumers*, not request *submitters* — nothing in this ecosystem yet
-  performs a signed `POST /v1/requests`, so this needs one more enrolled
-  test identity and an active inclusive subscription. The state-durability
-  and retry/recovery/fencing behavior this round trip would exercise is
-  already proven at the service layer, live, above.
+- Request/route/claim/completion state durably holds together across one
+  request's whole lifetime, including a real kernel restart mid-scenario,
+  and the required retry/crash-recovery/fencing tests are chained into
+  that same scenario (`tests/vertical_slice_continuity_contract.rs`, live
+  PostgreSQL). Denial and same-route concurrent-claim racing are
+  intentionally proven separately, not re-composed into this scenario —
+  see Section 7's numbered list for why.
+- TLS (nginx sidecars in front of both the kernel's and
+  `infernal-inquisitor-simple`'s Kubernetes `Service`s) and ADR-0008
+  enrollment, verified end to end against a real kind cluster —
+  `infernal-taskmaster-simple` and `infernal-worker-simple` complete real
+  signed HTTPS calls, enroll a fresh instance key against the live
+  TokenReview API, and poll `GET /v1/routes/eligible` successfully and
+  continuously.
+- The request-*submitting* half of the vertical slice, as one real signed
+  HTTP round trip: a one-off enrolled test identity submitted a real
+  signed `POST /v1/requests`, a worker claimed it, stalled past its
+  lease, a second worker instance reclaimed and completed it, the first
+  worker's stale completion attempt was correctly rejected, and the
+  kernel was restarted mid-scenario with no change to the result.
+  Postgres showed exactly one request, one route, a two-entry claim
+  history, and full audit/decision evidence. This run is also what
+  surfaced and closed two further real gaps (the kernel's own outbound
+  ADR-0013 evaluator call needed TLS too; `POLICY_EVALUATOR_AUTHORITY`/
+  `POLICY_EVALUATOR_ID` were never actually in the tracked kernel
+  manifest) and one genuine correctness bug — a completed route was
+  reclaimable indefinitely, since fixed in both `WorkClaimRepository`'s
+  `claim` and the eligible-route query.
 
 Nothing else belongs on this list. Exclusive delivery, `all_of` selectors,
 backlog matching, route transition history, correlation/causation,
