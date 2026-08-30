@@ -184,3 +184,16 @@ using `infernal-client-rs`'s `verify_incoming`, then applies the trivial
 "allow if a grant matched" policy the kernel already narrowed the request
 to. It holds no data of its own, matching the statelessness this ADR
 requires.
+
+On the kernel side, `Application::authority_service` builds an
+`HttpPolicyEvaluator`-backed `AuthorityService` on demand, and ILK-010's
+subscription create/disable handlers call it — the first real caller of
+this machinery. Since subscription management has no artifact content,
+these calls use a reserved schema-version pair
+(`NO_ARTIFACT_SCHEMA_VERSION`/`NO_ARTIFACT_PERMISSION_POLICY_SCHEMA_VERSION`
+in `src/kernel/authority.rs`) rather than a fabricated one-off ID. Two gaps
+still keep this fail-closed rather than functional against a real Postgres
+backend: nothing exposes `SchemaService::publish` over HTTP yet, and nothing
+links an enrolled instance's signing `service_id` to an `identities` row,
+which `authority_grants`/`authority_schema_versions`/`authority_decisions`
+all foreign-key every actor column to.

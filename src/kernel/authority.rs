@@ -137,6 +137,41 @@ impl SchemaVersionRefs {
     }
 }
 
+/// Reserved schema-version pair for governed actions that authorize
+/// administrative kernel state rather than artifact content -- for example
+/// ILK-010 subscription management, which has no artifact type or content
+/// to pin a real schema version to. `SchemaVersionRefs` never allows an
+/// absent version (mandatory-both, not optional), so an action with no real
+/// artifact still needs *some* value to reference; these fixed IDs are that
+/// value, used consistently by every non-artifact-bearing fact and by any
+/// grant meant to authorize such actions, rather than a fabricated one-off
+/// ID per call site.
+///
+/// These constants intentionally do not correspond to a row a schema
+/// publisher has to create out of band: nothing currently exposes
+/// `SchemaService::publish` over HTTP, and `authority_schema_versions.
+/// owner_service_id`/`authority_decisions.evaluator_service_id` are foreign
+/// keys into `identities`, which nothing yet links to an enrolled
+/// instance's signing `service_id` (ADR-0005 instance keys and ILK-001
+/// identities are separate, unconnected registries today). Until both gaps
+/// close, `AuthorityService::authorize` calls built on these constants will
+/// fail closed against a real Postgres backend (grant lookup and decision
+/// recording both hit the same `identities` foreign key), exactly as an
+/// unreachable dependency should.
+pub const NO_ARTIFACT_SCHEMA_VERSION: SchemaVersionId =
+    SchemaVersionId::from_uuid(Uuid::from_u128(1));
+pub const NO_ARTIFACT_PERMISSION_POLICY_SCHEMA_VERSION: SchemaVersionId =
+    SchemaVersionId::from_uuid(Uuid::from_u128(2));
+
+/// The [`SchemaVersionRefs`] every non-artifact-bearing governed action
+/// should use. See [`NO_ARTIFACT_SCHEMA_VERSION`].
+pub const fn no_artifact_schema_versions() -> SchemaVersionRefs {
+    SchemaVersionRefs::new(
+        NO_ARTIFACT_SCHEMA_VERSION,
+        NO_ARTIFACT_PERMISSION_POLICY_SCHEMA_VERSION,
+    )
+}
+
 /// The fact bundle for one of the two ILK-002 decision points. Request-
 /// acceptance authority has no destination; route authority does. Both
 /// share this one type and [`AuthorityService::authorize`] rather than two
@@ -886,5 +921,38 @@ mod tests {
     fn traces_to_authority_requirement() {
         assert_eq!(REQUIREMENT.id, "ILK-002");
         assert_eq!(REQUIREMENT.capability, "Authority");
+    }
+
+    #[test]
+    fn no_artifact_schema_versions_are_stable_and_distinct() {
+        let first = no_artifact_schema_versions();
+        let second = no_artifact_schema_versions();
+
+        assert_eq!(first, second);
+        assert_ne!(first.artifact(), first.permission_policy());
+    }
+
+    #[test]
+    fn a_grant_under_the_no_artifact_schema_versions_permits_matching_facts() {
+        let source = ActorId::new();
+        let action = ActionName::new("subscription.create").unwrap();
+        let grant = Grant::new(
+            source,
+            action.clone(),
+            Scope::wildcard(),
+            no_artifact_schema_versions(),
+            None,
+            0,
+            None,
+        )
+        .unwrap();
+        let facts = PolicyFacts::for_request_acceptance(
+            source,
+            action,
+            Scope::wildcard(),
+            no_artifact_schema_versions(),
+        );
+
+        assert!(grant.permits(&facts, 1));
     }
 }

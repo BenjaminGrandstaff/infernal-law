@@ -391,10 +391,29 @@ Implementation status:
   of policy `HttpPolicyEvaluator` expects a verdict for. Its own test suite
   proves this against a live (if fake) kernel-identity HTTP server, not just
   in-process values.
-- Pending: wiring `HttpPolicyEvaluator` into `Application`/`ServiceRequestGate`
-  (which needs a configured evaluator endpoint, and, in a real deployment, a
-  running evaluator process to reach), and schema registration/activation
-  for whatever schema versions real grants end up referencing (ADR-0013).
+- Complete: `Application::authority_service` builds an `HttpPolicyEvaluator`-backed
+  `AuthorityService` on demand (env-configured `POLICY_EVALUATOR_AUTHORITY`/
+  `POLICY_EVALUATOR_ID`), and ILK-010's `POST /v1/subscriptions` and
+  `DELETE /v1/subscriptions/{id}` handlers call it before mutating —
+  `GET /v1/subscriptions` does not, since listing the caller's own data does
+  not itself change governed administrative state. An unconfigured or
+  unreachable evaluator, or a deny verdict, fails closed (`503`/`403`),
+  never an implicit allow. Subscription management has no artifact content
+  to authorize, so these calls use the reserved
+  `NO_ARTIFACT_SCHEMA_VERSION`/`NO_ARTIFACT_PERMISSION_POLICY_SCHEMA_VERSION`
+  pair (`src/kernel/authority.rs`) rather than a fabricated one-off schema
+  version.
+- Pending, and blocking any real (non-`503`) decision from the above in
+  production: an HTTP route to actually call `SchemaService::publish` (it is
+  reachable from Rust/tests only today), and a way to link an enrolled
+  instance's signing `service_id` to an `identities` row — `authority_grants`,
+  `authority_schema_versions`, and `authority_decisions` all foreign-key
+  every actor column to `identities`, but nothing today creates that row for
+  an enrolled instance. Until both close, every `authorize` call against a
+  real Postgres backend fails on that same foreign key, correctly, rather
+  than an implicit allow. Also pending: schema registration/activation for
+  whatever schema versions real artifact-bearing grants end up referencing
+  (ADR-0013).
 - The existing signature, replay, and communication-admission gate is the
   required precondition and MUST remain ahead of this authority step.
 
@@ -718,9 +737,12 @@ Implementation status:
   so a caller can only ever create, list, or disable its own subscriptions;
   disabling another service's subscription is indistinguishable from
   disabling one that does not exist. These routes no longer return `501`.
+- Complete: create and disable additionally require an ILK-002 authority
+  decision (see ILK-002's own status above for the evaluator wiring and the
+  still-open gaps that keep it fail-closed against a real Postgres backend
+  today); list does not, since it changes no governed administrative state.
 - Pending: typed delivery modes, consumer groups, immutable all-of state
-  selectors, ILK-002 authorization integration on top of the ownership check
-  above, pending request backlog matching, fenced route assignment and
+  selectors, pending request backlog matching, fenced route assignment and
   completion, delivery cursors, production outbound handshake transport, and
   the eligible-route query contract external scheduler services will use
   (ADR-0011).

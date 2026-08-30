@@ -195,12 +195,16 @@ Subscription paths (`POST`/`GET /v1/subscriptions`, `DELETE
 successful admission, dispatch to ILK-010's real create/list/disable
 handlers rather than a placeholder response. The caller's verified identity
 is the only service identity these handlers ever act as — a request body can
-never claim ownership on another service's behalf. ILK-002 Authority's
-evaluate-and-record step (Step 8 above) is not yet called from this path, so
-these handlers are authenticated and ownership-scoped but not yet
-authorization-evaluated; that integration remains pending. Public health,
-initial enrollment, and the kernel-identity routes remain outside
-governed-request authentication by design. The kernel-identity route
+never claim ownership on another service's behalf. Create and disable
+additionally run ILK-002 Authority's evaluate-and-record step (Step 8 above,
+via `Application::authority_service`) before mutating; list does not, since
+it changes no governed administrative state. An unconfigured or unreachable
+evaluator, or a deny verdict, fails closed rather than an implicit allow —
+see [ADR-0013](decisions/0013-external-stateless-policy-evaluator-for-authority.md)
+and `NO_ARTIFACT_SCHEMA_VERSION` in `src/kernel/authority.rs` for why a real
+deployment cannot yet produce an `allow` here. Public health, initial
+enrollment, and the kernel-identity routes remain outside governed-request
+authentication by design. The kernel-identity route
 (`GET /v1/kernel-identity`) publishes this process's current public signing
 key so a caller can verify a kernel-signed message (see
 [ADR-0014](decisions/0014-publish-kernel-identity-endpoint.md)); publishing a

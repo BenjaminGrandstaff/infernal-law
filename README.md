@@ -32,6 +32,15 @@ It listens on `0.0.0.0:8080` by default and provides:
 - `GET /v1/kernel-identity` — this process's current public signing key,
   deliberately unauthenticated (see
   [ADR-0014](docs/architecture/decisions/0014-publish-kernel-identity-endpoint.md))
+- `POST`/`GET /v1/subscriptions`, `DELETE /v1/subscriptions/{id}` — ILK-010
+  subscription create/list/disable, signed and admitted like any other
+  governed route. Create and disable additionally require an ILK-002
+  authority decision from the evaluator configured by
+  `POLICY_EVALUATOR_AUTHORITY` (its host, no scheme or path) and
+  `POLICY_EVALUATOR_ID` (its `service_id`, a UUID) — unset or unreachable,
+  these routes fail closed with `503` rather than an implicit allow. See
+  [`NO_ARTIFACT_SCHEMA_VERSION`](src/kernel/authority.rs) for why a real
+  deployment cannot yet produce an `allow` here.
 
 Set `BIND_ADDRESS` or `PORT` to change the listener configuration. Startup
 fails if `DATABASE_URL` or `INFERNAL_LAW_SERVICE_ID` is absent, the service ID

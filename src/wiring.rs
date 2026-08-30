@@ -7,7 +7,9 @@ use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 
 use crate::infrastructure::database::{Database, DatabaseError};
+use crate::infrastructure::http_policy_evaluator::HttpPolicyEvaluator;
 use crate::infrastructure::postgres_admission_repository::PostgresAdmissionRepository;
+use crate::infrastructure::postgres_authority_repository::PostgresAuthorityRepository;
 use crate::infrastructure::postgres_enrollment_binding_repository::PostgresEnrollmentBindingRepository;
 use crate::infrastructure::postgres_handshake_repository::PostgresHandshakeRepository;
 use crate::infrastructure::postgres_identity_repository::PostgresIdentityRepository;
@@ -17,6 +19,7 @@ use crate::infrastructure::postgres_request_repository::PostgresRequestRepositor
 use crate::infrastructure::postgres_subscribed_instance_discovery::PostgresSubscribedInstanceDiscovery;
 use crate::infrastructure::postgres_subscription_repository::PostgresSubscriptionRepository;
 use crate::kernel::admission::AdmissionService;
+use crate::kernel::authority::{AuthorityError, AuthorityService};
 use crate::kernel::enrollment::{EnrollmentService, WorkloadTokenReviewer};
 use crate::kernel::handshakes::{HandshakeReconciler, HandshakeTransport};
 use crate::kernel::identity::{ActorId, IdentityService};
@@ -124,6 +127,34 @@ impl Application {
 
     pub const fn subscriptions(&self) -> &SubscriptionService<PostgresSubscriptionRepository> {
         &self.subscriptions
+    }
+
+    /// Builds an ILK-002 authority service against a configured external
+    /// policy evaluator, signing outbound evaluator calls with this
+    /// process's own long-lived instance credential -- the same key
+    /// published at `GET /v1/kernel-identity` (ADR-0014). Built fresh per
+    /// call, like [`Application::service_request_gate`], rather than held
+    /// as a field, since `HttpPolicyEvaluator` borrows the credential.
+    pub fn authority_service(
+        &self,
+        evaluator_authority: impl Into<String>,
+        evaluator_id: ActorId,
+    ) -> Result<
+        AuthorityService<
+            PostgresAuthorityRepository,
+            HttpPolicyEvaluator<'_>,
+            PostgresAuthorityRepository,
+        >,
+        AuthorityError,
+    > {
+        let evaluator = HttpPolicyEvaluator::new(&self.instance_credential, evaluator_authority)?;
+        let repository = PostgresAuthorityRepository::new(self.database.clone());
+        Ok(AuthorityService::new(
+            repository.clone(),
+            evaluator,
+            evaluator_id,
+            repository,
+        ))
     }
 
     pub const fn replay_protection(

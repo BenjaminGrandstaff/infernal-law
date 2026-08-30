@@ -10,7 +10,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
+use crate::infrastructure::http_policy_evaluator::HttpPolicyEvaluator;
 use crate::infrastructure::kubernetes_token_reviewer::KubernetesTokenReviewer;
+use crate::infrastructure::postgres_authority_repository::PostgresAuthorityRepository;
+use crate::kernel::authority::{
+    AuthorityDecision, AuthorityDecisionRecorder, AuthorityError, AuthorityRepository,
+    AuthorityService, PolicyEvaluator, PolicyFacts, Scope, no_artifact_schema_versions,
+};
 use crate::kernel::enrollment::{
     EnrollmentBindingRepository, EnrollmentError, EnrollmentRequest, EnrollmentService,
     WorkloadTokenReviewer,
@@ -21,6 +27,7 @@ use crate::kernel::instance_registry::{InstanceRegistryRepository, RegisteredIns
 use crate::kernel::request_gate::{
     AdmittedServiceRequest, ServiceRequestGate, ServiceRequestGateError,
 };
+use crate::kernel::requests::ActionName;
 use crate::kernel::service_requests::{
     ServiceRequestAuthenticationError, ServiceRequestParts, SignedServiceRequest,
 };
@@ -44,6 +51,8 @@ const DEFAULT_ADDRESS: &str = "0.0.0.0";
 const DEFAULT_PORT: &str = "8080";
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 pub const MAX_ENROLLMENT_BODY_BYTES: usize = 40 * 1024;
+const POLICY_EVALUATOR_AUTHORITY_ENV: &str = "POLICY_EVALUATOR_AUTHORITY";
+const POLICY_EVALUATOR_ID_ENV: &str = "POLICY_EVALUATOR_ID";
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Response {
@@ -153,6 +162,45 @@ where
     }
 }
 
+/// Gates a governed administrative action (one that changes state, not a
+/// read of the caller's own data) behind ILK-002 Authority. Subscription
+/// management has no artifact content to pin a real schema version to, so
+/// every call here uses [`no_artifact_schema_versions`] -- see that
+/// constant's documentation for why, and for the still-open gaps that keep
+/// this fail-closed against a real Postgres backend today.
+pub trait SubscriptionAuthorizer {
+    fn authorize_subscription_action(
+        &self,
+        service_id: ActorId,
+        action: &str,
+        now: i64,
+    ) -> Result<AuthorityDecision, AuthorityError>;
+}
+
+impl<R, E, D> SubscriptionAuthorizer for AuthorityService<R, E, D>
+where
+    R: AuthorityRepository,
+    E: PolicyEvaluator,
+    D: AuthorityDecisionRecorder,
+{
+    fn authorize_subscription_action(
+        &self,
+        service_id: ActorId,
+        action: &str,
+        now: i64,
+    ) -> Result<AuthorityDecision, AuthorityError> {
+        let action = ActionName::new(action)
+            .unwrap_or_else(|_| panic!("subscription action {action:?} must be a valid literal"));
+        let facts = PolicyFacts::for_request_acceptance(
+            service_id,
+            action,
+            Scope::wildcard(),
+            no_artifact_schema_versions(),
+        );
+        self.authorize(facts, now)
+    }
+}
+
 pub fn serve(application: Application) -> std::io::Result<()> {
     let address = env::var("BIND_ADDRESS").unwrap_or_else(|_| DEFAULT_ADDRESS.to_owned());
     let port = env::var("PORT").unwrap_or_else(|_| DEFAULT_PORT.to_owned());
@@ -229,7 +277,16 @@ fn dispatch(request: ParsedRequest, application: &Application) -> Response {
             Err(response) => return response,
         };
         let service_id = admitted.verified().service_id();
-        return subscription_route(&request, service_id, application.subscriptions());
+        let authority = match policy_evaluator_from_env(application) {
+            Ok(authority) => authority,
+            Err(response) => return response,
+        };
+        return subscription_route(
+            &request,
+            service_id,
+            application.subscriptions(),
+            &authority,
+        );
     }
 
     if request.path == "/health/ready" {
@@ -330,6 +387,13 @@ impl GovernedErrorResponse {
             message: "subscription request could not be completed",
         }
     }
+
+    const fn subscription_not_authorized() -> Self {
+        Self {
+            code: "subscription_not_authorized",
+            message: "subscription action is not authorized",
+        }
+    }
 }
 
 fn authentication_rejected() -> Response {
@@ -376,33 +440,70 @@ fn is_supported_governed_method(method: &str, path: &str) -> bool {
         || (path.starts_with("/v1/subscriptions/") && method == "DELETE")
 }
 
+/// Builds the configured `HttpPolicyEvaluator`-backed authority service, or
+/// a sanitized 503 if the evaluator is unconfigured or unreachable --
+/// fail-closed, never an implicit allow, matching every other unreachable
+/// dependency in this module.
+fn policy_evaluator_from_env(
+    application: &Application,
+) -> Result<
+    AuthorityService<
+        PostgresAuthorityRepository,
+        HttpPolicyEvaluator<'_>,
+        PostgresAuthorityRepository,
+    >,
+    Response,
+> {
+    let unavailable = || {
+        json_response(
+            "503 Service Unavailable",
+            &GovernedErrorResponse::internal_error(),
+        )
+    };
+    let evaluator_authority =
+        env::var(POLICY_EVALUATOR_AUTHORITY_ENV).map_err(|_| unavailable())?;
+    let evaluator_id: ActorId = env::var(POLICY_EVALUATOR_ID_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(unavailable)?;
+    application
+        .authority_service(evaluator_authority, evaluator_id)
+        .map_err(|_| unavailable())
+}
+
 /// Dispatches an already-authenticated governed request to ILK-010's
 /// subscription operations. `service_id` is the caller's own verified
 /// identity (`VerifiedServiceRequest::service_id`), never taken from the
-/// request body, so a caller can only ever act as itself.
-fn subscription_route<R: SubscriptionRepository>(
+/// request body, so a caller can only ever act as itself. Create and
+/// disable additionally require an ILK-002 authority decision, since both
+/// change governed administrative state; list is a read of the caller's own
+/// data and is gated by ownership alone, matching ILK-002's own wording
+/// ("before... changing governed administrative state").
+fn subscription_route<R: SubscriptionRepository, A: SubscriptionAuthorizer>(
     request: &ParsedRequest,
     service_id: ActorId,
     subscriptions: &SubscriptionService<R>,
+    authority: &A,
 ) -> Response {
     let path = request.path.split('?').next().unwrap_or(&request.path);
     if path == "/v1/subscriptions" {
         return match request.method.as_str() {
-            "POST" => create_subscription(request, service_id, subscriptions),
+            "POST" => create_subscription(request, service_id, subscriptions, authority),
             "GET" => list_subscriptions(&request.path, service_id, subscriptions),
             _ => text_response("405 Method Not Allowed", "method not allowed\n"),
         };
     }
     match path.strip_prefix("/v1/subscriptions/") {
-        Some(id) => disable_subscription(id, service_id, subscriptions),
+        Some(id) => disable_subscription(id, service_id, subscriptions, authority),
         None => text_response("404 Not Found", "not found\n"),
     }
 }
 
-fn create_subscription<R: SubscriptionRepository>(
+fn create_subscription<R: SubscriptionRepository, A: SubscriptionAuthorizer>(
     request: &ParsedRequest,
     service_id: ActorId,
     subscriptions: &SubscriptionService<R>,
+    authority: &A,
 ) -> Response {
     if !request
         .content_type
@@ -427,6 +528,9 @@ fn create_subscription<R: SubscriptionRepository>(
         Ok(event_type) => event_type,
         Err(error) => return subscription_error_response(&error),
     };
+    if let Some(response) = check_authorized(authority, service_id, "subscription.create") {
+        return response;
+    }
     match subscriptions.create(service_id, event_type, unix_time()) {
         Ok(subscription) => {
             json_response("201 Created", &SubscriptionResponse::from(&subscription))
@@ -460,10 +564,11 @@ fn list_subscriptions<R: SubscriptionRepository>(
     }
 }
 
-fn disable_subscription<R: SubscriptionRepository>(
+fn disable_subscription<R: SubscriptionRepository, A: SubscriptionAuthorizer>(
     id: &str,
     service_id: ActorId,
     subscriptions: &SubscriptionService<R>,
+    authority: &A,
 ) -> Response {
     let subscription_id: SubscriptionId = match id.parse() {
         Ok(id) => id,
@@ -474,9 +579,34 @@ fn disable_subscription<R: SubscriptionRepository>(
             );
         }
     };
+    if let Some(response) = check_authorized(authority, service_id, "subscription.disable") {
+        return response;
+    }
     match subscriptions.disable(service_id, subscription_id, unix_time()) {
         Ok(subscription) => json_response("200 OK", &SubscriptionResponse::from(&subscription)),
         Err(error) => subscription_error_response(&error),
+    }
+}
+
+/// Runs an ILK-002 authority decision for `action` and returns `Some`
+/// response to short-circuit with if the caller should not proceed --
+/// `None` means the caller is authorized. An unreachable or erroring
+/// evaluator/repository fails closed as `503`, never as an implicit allow.
+fn check_authorized<A: SubscriptionAuthorizer>(
+    authority: &A,
+    service_id: ActorId,
+    action: &str,
+) -> Option<Response> {
+    match authority.authorize_subscription_action(service_id, action, unix_time()) {
+        Ok(decision) if decision.is_allowed() => None,
+        Ok(_) => Some(json_response(
+            "403 Forbidden",
+            &GovernedErrorResponse::subscription_not_authorized(),
+        )),
+        Err(_) => Some(json_response(
+            "503 Service Unavailable",
+            &GovernedErrorResponse::internal_error(),
+        )),
     }
 }
 
@@ -954,7 +1084,59 @@ mod tests {
         use std::sync::{Arc, Mutex};
 
         use super::super::*;
+        use crate::kernel::authority::{DecisionId, PolicyBundleVersion, Verdict};
         use crate::kernel::subscriptions::{EventType, Subscription};
+
+        /// A `SubscriptionAuthorizer` fixture that always returns a fixed
+        /// verdict, or a fixed evaluator/repository error, so the HTTP
+        /// gating logic can be tested without a real `AuthorityService`.
+        struct FixedAuthority(Result<bool, ()>);
+
+        impl FixedAuthority {
+            fn allow() -> Self {
+                Self(Ok(true))
+            }
+
+            fn deny() -> Self {
+                Self(Ok(false))
+            }
+
+            fn unavailable() -> Self {
+                Self(Err(()))
+            }
+        }
+
+        impl SubscriptionAuthorizer for FixedAuthority {
+            fn authorize_subscription_action(
+                &self,
+                service_id: ActorId,
+                action: &str,
+                now: i64,
+            ) -> Result<AuthorityDecision, AuthorityError> {
+                let allowed = self
+                    .0
+                    .map_err(|()| AuthorityError::Evaluator("fixed authority error".to_owned()))?;
+                let facts = PolicyFacts::for_request_acceptance(
+                    service_id,
+                    ActionName::new(action).unwrap(),
+                    Scope::wildcard(),
+                    no_artifact_schema_versions(),
+                );
+                let verdict = if allowed {
+                    Verdict::Allow
+                } else {
+                    Verdict::Deny
+                };
+                Ok(AuthorityDecision::restore(
+                    DecisionId::new(),
+                    facts,
+                    verdict,
+                    ActorId::new(),
+                    Some(PolicyBundleVersion::new("test").unwrap()),
+                    now,
+                ))
+            }
+        }
 
         #[derive(Clone, Default)]
         struct MemorySubscriptions(Arc<Mutex<Vec<Subscription>>>);
@@ -1053,7 +1235,12 @@ mod tests {
                 br#"{"event_type":"resource.created.v1"}"#,
             );
 
-            let response = create_subscription(&request, service_id, &subscriptions);
+            let response = create_subscription(
+                &request,
+                service_id,
+                &subscriptions,
+                &FixedAuthority::allow(),
+            );
 
             assert_eq!(response.status, "201 Created");
             assert!(response.body.contains("resource.created.v1"));
@@ -1066,7 +1253,12 @@ mod tests {
             let mut request = parsed_request("POST", "/v1/subscriptions", b"{}");
             request.content_type = Some("text/plain".to_owned());
 
-            let response = create_subscription(&request, ActorId::new(), &subscriptions);
+            let response = create_subscription(
+                &request,
+                ActorId::new(),
+                &subscriptions,
+                &FixedAuthority::allow(),
+            );
 
             assert_eq!(response.status, "415 Unsupported Media Type");
         }
@@ -1076,7 +1268,12 @@ mod tests {
             let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
             let request = parsed_request("POST", "/v1/subscriptions", b"not json");
 
-            let response = create_subscription(&request, ActorId::new(), &subscriptions);
+            let response = create_subscription(
+                &request,
+                ActorId::new(),
+                &subscriptions,
+                &FixedAuthority::allow(),
+            );
 
             assert_eq!(response.status, "400 Bad Request");
         }
@@ -1090,7 +1287,12 @@ mod tests {
                 br#"{"event_type":"Not Valid"}"#,
             );
 
-            let response = create_subscription(&request, ActorId::new(), &subscriptions);
+            let response = create_subscription(
+                &request,
+                ActorId::new(),
+                &subscriptions,
+                &FixedAuthority::allow(),
+            );
 
             assert_eq!(response.status, "400 Bad Request");
         }
@@ -1112,7 +1314,12 @@ mod tests {
                 br#"{"event_type":"resource.created.v1"}"#,
             );
 
-            let response = create_subscription(&request, service_id, &subscriptions);
+            let response = create_subscription(
+                &request,
+                service_id,
+                &subscriptions,
+                &FixedAuthority::allow(),
+            );
 
             assert_eq!(response.status, "409 Conflict");
         }
@@ -1164,7 +1371,12 @@ mod tests {
                 .create(owner, EventType::new("resource.created.v1").unwrap(), 1)
                 .unwrap();
 
-            let response = disable_subscription(&created.id().to_string(), owner, &subscriptions);
+            let response = disable_subscription(
+                &created.id().to_string(),
+                owner,
+                &subscriptions,
+                &FixedAuthority::allow(),
+            );
 
             assert_eq!(response.status, "200 OK");
             assert!(response.body.contains("\"active\":false"));
@@ -1174,7 +1386,12 @@ mod tests {
         fn disable_rejects_a_malformed_subscription_id() {
             let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
 
-            let response = disable_subscription("not-a-uuid", ActorId::new(), &subscriptions);
+            let response = disable_subscription(
+                "not-a-uuid",
+                ActorId::new(),
+                &subscriptions,
+                &FixedAuthority::allow(),
+            );
 
             assert_eq!(response.status, "400 Bad Request");
         }
@@ -1188,8 +1405,12 @@ mod tests {
                 .create(owner, EventType::new("resource.created.v1").unwrap(), 1)
                 .unwrap();
 
-            let response =
-                disable_subscription(&created.id().to_string(), stranger, &subscriptions);
+            let response = disable_subscription(
+                &created.id().to_string(),
+                stranger,
+                &subscriptions,
+                &FixedAuthority::allow(),
+            );
 
             assert_eq!(response.status, "404 Not Found");
         }
@@ -1204,11 +1425,21 @@ mod tests {
                 br#"{"event_type":"resource.created.v1"}"#,
             );
 
-            let created = subscription_route(&create_request, owner, &subscriptions);
+            let created = subscription_route(
+                &create_request,
+                owner,
+                &subscriptions,
+                &FixedAuthority::allow(),
+            );
             assert_eq!(created.status, "201 Created");
 
             let list_request = parsed_request("GET", "/v1/subscriptions", b"");
-            let listed = subscription_route(&list_request, owner, &subscriptions);
+            let listed = subscription_route(
+                &list_request,
+                owner,
+                &subscriptions,
+                &FixedAuthority::allow(),
+            );
             assert_eq!(listed.status, "200 OK");
 
             let subscription_id = subscriptions.list(owner).unwrap()[0].id();
@@ -1217,8 +1448,105 @@ mod tests {
                 &format!("/v1/subscriptions/{subscription_id}"),
                 b"",
             );
-            let disabled = subscription_route(&delete_request, owner, &subscriptions);
+            let disabled = subscription_route(
+                &delete_request,
+                owner,
+                &subscriptions,
+                &FixedAuthority::allow(),
+            );
             assert_eq!(disabled.status, "200 OK");
+        }
+
+        #[test]
+        fn create_is_forbidden_when_authority_denies() {
+            let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
+            let request = parsed_request(
+                "POST",
+                "/v1/subscriptions",
+                br#"{"event_type":"resource.created.v1"}"#,
+            );
+
+            let response = create_subscription(
+                &request,
+                ActorId::new(),
+                &subscriptions,
+                &FixedAuthority::deny(),
+            );
+
+            assert_eq!(response.status, "403 Forbidden");
+        }
+
+        #[test]
+        fn create_fails_closed_when_the_evaluator_is_unreachable() {
+            let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
+            let request = parsed_request(
+                "POST",
+                "/v1/subscriptions",
+                br#"{"event_type":"resource.created.v1"}"#,
+            );
+
+            let response = create_subscription(
+                &request,
+                ActorId::new(),
+                &subscriptions,
+                &FixedAuthority::unavailable(),
+            );
+
+            assert_eq!(response.status, "503 Service Unavailable");
+        }
+
+        #[test]
+        fn disable_is_forbidden_when_authority_denies() {
+            let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
+            let owner = ActorId::new();
+            let created = subscriptions
+                .create(owner, EventType::new("resource.created.v1").unwrap(), 1)
+                .unwrap();
+
+            let response = disable_subscription(
+                &created.id().to_string(),
+                owner,
+                &subscriptions,
+                &FixedAuthority::deny(),
+            );
+
+            assert_eq!(response.status, "403 Forbidden");
+        }
+
+        #[test]
+        fn disable_fails_closed_when_the_evaluator_is_unreachable() {
+            let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
+            let owner = ActorId::new();
+            let created = subscriptions
+                .create(owner, EventType::new("resource.created.v1").unwrap(), 1)
+                .unwrap();
+
+            let response = disable_subscription(
+                &created.id().to_string(),
+                owner,
+                &subscriptions,
+                &FixedAuthority::unavailable(),
+            );
+
+            assert_eq!(response.status, "503 Service Unavailable");
+        }
+
+        #[test]
+        fn a_denied_disable_does_not_mutate_the_subscription() {
+            let subscriptions = SubscriptionService::new(MemorySubscriptions::default());
+            let owner = ActorId::new();
+            let created = subscriptions
+                .create(owner, EventType::new("resource.created.v1").unwrap(), 1)
+                .unwrap();
+
+            disable_subscription(
+                &created.id().to_string(),
+                owner,
+                &subscriptions,
+                &FixedAuthority::deny(),
+            );
+
+            assert!(subscriptions.list_active(owner).unwrap()[0].is_active());
         }
     }
 }
