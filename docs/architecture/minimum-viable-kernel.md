@@ -362,9 +362,13 @@ Implementation status:
   implements the signing side of ADR-0003 and verifying a kernel identity
   against `GET /v1/kernel-identity`, and this repository's own test suite
   proves a request it signs is accepted by the kernel's real, unmodified
-  `ServiceRequestVerifier` (`tests/infernal_client_rs_wire_compatibility.rs`).
-  `infernal-client-rs` is now a runtime dependency (git, pinned to a
-  commit), not only a dev-dependency.
+  `ServiceRequestVerifier`, and — the mechanism a reference policy evaluator
+  will actually run — that a request the kernel signs with its own
+  `InstanceCredential` via `sign_with` is correctly accepted by
+  `infernal-client-rs`'s own `verify_incoming`
+  (`tests/infernal_client_rs_wire_compatibility.rs`). `infernal-client-rs`
+  is now a runtime dependency (git, pinned to a commit), not only a
+  dev-dependency.
 - Complete: `HttpPolicyEvaluator` (`src/infrastructure/http_policy_evaluator.rs`)
   implements `PolicyEvaluator` as a real signed HTTP call, using
   `infernal-client-rs`'s `sign_with` to sign with the kernel's own

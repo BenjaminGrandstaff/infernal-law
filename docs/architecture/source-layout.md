@@ -97,8 +97,10 @@ tests/
 ├── governed_http_middleware_contract.rs
 │                            # strict HTTP extraction/sanitization contract
 ├── infernal_client_rs_wire_compatibility.rs
-│                            # proves the infernal-client-rs dev-dependency's
-│                            # signed output verifies against this kernel
+│                            # proves infernal-client-rs's signed output
+│                            # verifies against this kernel, and that a
+│                            # kernel-signed request verifies via
+│                            # infernal-client-rs's own verify_incoming
 ├── kernel_requirements.rs  # independently runnable public kernel test
 ├── postgres_identity_repository.rs
 │                            # opt-in ILK-001 durability test

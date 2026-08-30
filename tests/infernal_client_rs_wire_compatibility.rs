@@ -4,9 +4,12 @@
 //! of writing a second, bespoke signing implementation inside the kernel
 //! (ADR-0012): if this ever drifts, this test is what catches it.
 
-use infernal_client::{ClientCredential, RequestParts as ClientRequestParts, SignedRequest};
+use infernal_client::{
+    ClientCredential, ClientPublicKey, IncomingRequest, RequestParts as ClientRequestParts,
+    SignedRequest, verify_incoming,
+};
 use infernal_law::kernel::identity::ActorId;
-use infernal_law::kernel::instance_keys::{InstanceId, InstancePublicKey};
+use infernal_law::kernel::instance_keys::{InstanceCredential, InstanceId, InstancePublicKey};
 use infernal_law::kernel::instance_registry::{InstanceRegistryError, RegisteredInstance};
 use infernal_law::kernel::service_requests::{
     EligibleInstanceResolver, ServiceRequestAuthenticationError, ServiceRequestParts,
@@ -145,6 +148,64 @@ fn a_body_altered_after_signing_fails_the_kernels_content_digest_check() {
         verifier.verify(&kernel_request, 1_000),
         Err(ServiceRequestAuthenticationError::InvalidContentDigest)
     );
+}
+
+/// Mirrors `HttpPolicyEvaluator::build_signed_request`'s exact signing path:
+/// the kernel's own long-lived `InstanceCredential` signs via
+/// `SignedRequest::sign_with`, restoring a `ClientPublicKey` from the same
+/// bytes rather than generating a second key. This is the specific
+/// verification mechanism a reference policy evaluator will run against
+/// signed kernel calls, so it must be proven independently of the
+/// kernel-signs/kernel-verifies round trip above.
+#[test]
+fn a_request_signed_by_the_kernels_own_instance_credential_verifies_via_infernal_client_rs() {
+    let credential = InstanceCredential::generate(ActorId::new());
+    let public_key = credential.public_key();
+    let client_public_key = ClientPublicKey::restore(
+        *public_key.service_id().as_uuid(),
+        *public_key.instance_id().as_uuid(),
+        *public_key.key_id().as_uuid(),
+        *public_key.public_key_bytes(),
+    )
+    .unwrap();
+
+    let request_id = Uuid::new_v4();
+    let body = br#"{"action":"billing.invoice.submit"}"#;
+    let parts = ClientRequestParts::new(
+        "POST",
+        "policy-evaluator.example.test",
+        "/v1/authority/evaluate",
+        "application/json",
+        body,
+        request_id,
+    )
+    .unwrap();
+    let signed = SignedRequest::sign_with(
+        parts,
+        &client_public_key,
+        990,
+        1_020,
+        "infernal_client_rs_wire_0004",
+        |message| *credential.sign(message).as_bytes(),
+    )
+    .unwrap();
+
+    let incoming = IncomingRequest::from_wire(
+        signed.parts().clone(),
+        &signed.service_id().to_string(),
+        &signed.instance_id().to_string(),
+        signed.content_digest(),
+        signed.signature_input(),
+        signed.signature(),
+    )
+    .unwrap();
+
+    let verified = verify_incoming(&incoming, &client_public_key, 1_000).unwrap();
+
+    assert_eq!(verified.service_id(), *public_key.service_id().as_uuid());
+    assert_eq!(verified.request_id(), request_id);
+    assert_eq!(verified.created(), 990);
+    assert_eq!(verified.expires(), 1_020);
 }
 
 #[test]
