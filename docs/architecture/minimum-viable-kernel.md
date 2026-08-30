@@ -4,48 +4,76 @@
 > Last reviewed: 2026-08-30
 > Owners: TODO
 
-This document has two jobs. First, it defines the **minimum viable kernel
-(v0.1.0)**: one complete, provable, governed-work vertical slice, narrow
-enough to actually finish. Second, it preserves every other requirement the
-kernel is expected to own eventually, explicitly classified so that scope
-never expands by accident and nothing is silently deleted because it isn't
-needed yet.
+This document has two jobs. First, it defines the **Minimum Viable Infernal
+Law Kernel (`v0.1.0`)**: one complete, provable, governed-work vertical
+slice, narrow enough to actually finish. Second, it preserves every other
+requirement the kernel is expected to own eventually, explicitly classified
+so that scope never expands by accident and nothing is silently deleted
+because it isn't needed yet.
 
 Every requirement below is classified into exactly one of:
 
-- **MVP** — required to tag `v0.1.0`.
-- **Post-MVP / Kernel 1.0** — a real, permanent kernel responsibility
-  (it protects authority, correctness, durability, or replay semantics) that
-  MUST NOT block `v0.1.0`.
-- **External infrastructure** — optimization, placement, or policy-algorithm
-  responsibility that belongs to a service other than the kernel
-  (Taskmaster, Inquisitor, or a storage adapter).
-- **Domain-owned** — business/artifact meaning that belongs to the services
-  built on top of the kernel, never to the kernel itself.
+- **MVP Kernel** — required to tag `v0.1.0`.
+- **Future Kernel / Kernel 1.0** — a real, permanent kernel responsibility
+  (it protects authority, communication, or correctness) that MUST NOT
+  block `v0.1.0`.
+- **External Infrastructure Service** — optimization, placement, or
+  policy-algorithm responsibility that belongs to a service other than the
+  kernel (Taskmaster, Inquisitor, or a storage adapter).
+- **Domain-Owned Service Responsibility** — data, search, business
+  semantics, or domain mutation that belongs to the services built on top
+  of the kernel, never to the kernel itself.
 
 The keywords **MUST**, **MUST NOT**, **SHOULD**, and **MAY** express
-requirement strength throughout.
+requirement strength throughout. This is a **scope-reduction-by-classification**
+document, not a simplification-by-deletion one: a requirement that is real
+and useful but not required for `v0.1.0` is reclassified and preserved, never
+dropped.
 
 ## Table of contents
 
-1. [MVP objective](#1-mvp-objective)
-2. [MVP architecture boundary](#2-mvp-architecture-boundary)
-3. [MVP required capabilities](#3-mvp-required-capabilities)
-4. [MVP end-to-end acceptance test](#4-mvp-end-to-end-acceptance-test)
-5. [MVP failure/recovery tests](#5-mvp-failurerecovery-tests)
-6. [Current implementation status](#6-current-implementation-status)
-7. [Future Kernel / Kernel 1.0](#7-future-kernel-kernel-10)
-8. [External service responsibilities](#8-external-service-responsibilities)
-9. [Explicitly domain-owned responsibilities](#9-explicitly-domain-owned-responsibilities)
-10. [Open design decisions](#10-open-design-decisions)
+1. [Objective](#1-objective)
+2. [Architectural boundary](#2-architectural-boundary)
+3. [MVP definition](#3-mvp-definition)
+4. [MVP vertical slice](#4-mvp-vertical-slice)
+5. [MVP capabilities](#5-mvp-capabilities)
+6. [MVP failure/recovery acceptance tests](#6-mvp-failurerecovery-acceptance-tests)
+7. [Current MVP implementation status](#7-current-mvp-implementation-status)
+8. [Future Kernel / Kernel 1.0](#8-future-kernel-kernel-10)
+9. [External infrastructure services](#9-external-infrastructure-services)
+10. [Domain-owned services](#10-domain-owned-services)
+11. [Namespace, data, and search ownership](#11-namespace-data-and-search-ownership)
+12. [Open design decisions](#12-open-design-decisions)
 
-## 1. MVP objective
+## 1. Objective
 
-The boundary rule that organizes this whole document:
+Infernal Law is a **zero-trust mediation kernel**. Its job is to own:
 
-> The kernel owns authority and correctness. External infrastructure
-> services own optimization and execution policy. Domain services own
-> meaning.
+- authenticated service identity;
+- communication admission and replay protection;
+- authority enforcement;
+- durable Request state;
+- routing correctness;
+- route ownership;
+- claims, leases, and fencing;
+- idempotency;
+- audit and consequential decision evidence;
+- the trusted communication path between services.
+
+The kernel MUST NOT become the authoritative business datastore, search
+engine, workflow engine, scheduler, geometry engine, rules engine, or
+universal artifact database. Those are jobs for other services, built on
+top of the trust the kernel provides.
+
+The organizing rule for this entire document:
+
+> **The kernel owns authority, communication, and correctness.**
+>
+> **External infrastructure services own optimization and execution
+> policy.**
+>
+> **Domain services own data, search, business semantics, and domain
+> mutation.**
 
 Concretely, each party answers a different question:
 
@@ -56,42 +84,17 @@ Concretely, each party answers a different question:
 - **Inquisitor** (external policy evaluator) answers: *given this
   kernel-supplied fact bundle and policy version, does policy evaluate to
   allow or deny?*
-- **Domain services** answer: *what does this artifact/request mean, and
-  what business action should be performed?*
+- **Domain services** answer: *what does this artifact/request mean, what
+  business action should be performed, and how should the resulting data
+  be stored, indexed, or searched?*
 
-The minimum viable kernel (`v0.1.0`) exists once the kernel can prove one
-complete governed-work vertical slice, end to end, against a real
-PostgreSQL backend:
+Do not move a responsibility out of the kernel merely to reduce its size if
+doing so would create a second authority source or let an external service
+violate a kernel invariant. Likewise, do not keep a responsibility in the
+kernel merely because the kernel happens to consume information that
+responsibility produces.
 
-1. An authenticated service submits a signed Request.
-2. The kernel authenticates the service.
-3. The kernel performs communication admission/replay protection.
-4. The kernel constructs trusted authority facts and obtains an allow/deny
-   verdict from the external stateless policy evaluator.
-5. The kernel records and enforces that authority decision.
-6. The accepted Request is durably persisted in PostgreSQL.
-7. A basic active subscription can match the Request.
-8. The kernel materializes a durable route.
-9. An external scheduler can query eligible work.
-10. The scheduler proposes a worker/route claim.
-11. The kernel atomically arbitrates the claim using lease/fencing
-    semantics.
-12. The worker can complete the work through the kernel.
-13. The resulting state and required audit evidence are durable.
-14. Restart/retry/failure cannot silently duplicate, lose, or incorrectly
-    complete the work.
-
-Section 4 maps every step above onto the concrete kernel mechanism (and
-test) that proves it. Section 5 lists the specific failure/recovery proofs
-`v0.1.0` also requires. Section 6 is the short, current answer to "what
-exactly is left before tagging `v0.1.0`."
-
-A capability that is real, useful, and even partially built is not
-automatically MVP. It is MVP only if the vertical slice above cannot be
-proven without it. Everything else is preserved — never deleted — under
-Sections 7 through 9, classified by who should own it long-term.
-
-## 2. MVP architecture boundary
+## 2. Architectural boundary
 
 This section is the kernel's standing architecture: the object model,
 storage model, and routing ledger that both the MVP slice and every
@@ -114,7 +117,7 @@ scoping; MVP simply exercises a subset of it (marked inline below).
   scheduler never receives that state from a worker directly or from any
   other event source. See
   [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md)
-  and [Section 8](#8-external-service-responsibilities).
+  and [Section 9](#9-external-infrastructure-services).
 - **Policy evaluator** (Inquisitor) — an ordinary, non-privileged service
   principal that holds no authorization data of its own. The kernel sends
   it a fact bundle (source, action, schema versions, scope/artifact
@@ -123,7 +126,7 @@ scoping; MVP simply exercises a subset of it (marked inline below).
   kernel alone owns the grants, schemas, and audit trail; an unreachable or
   erroring evaluator is denial, never implicit allow. See
   [ADR-0013](decisions/0013-external-stateless-policy-evaluator-for-authority.md)
-  and [Section 8](#8-external-service-responsibilities).
+  and [Section 9](#9-external-infrastructure-services).
 - **External user subject** — optional provenance asserted by an
   authenticated service; it is not a kernel principal or credential.
 - **Request** — the immutable, signed, durable communication envelope
@@ -138,10 +141,10 @@ scoping; MVP simply exercises a subset of it (marked inline below).
 - **Exclusive subscription** — a competing-consumer subscription for which
   one request/consumer-group route may be assigned to only one eligible
   service at a time and may be reassigned after a fenced lease expires.
-  **Post-MVP / Kernel 1.0** — see [ILK-010](#ilk-010-subscriptions).
+  **Future Kernel** — see [ILK-010](#ilk-010-subscriptions).
 - **Inclusive subscription** — a fan-out subscription for which every
   matching stable destination service owns an independent request route
-  and completion. **MVP.**
+  and completion. **MVP Kernel.**
 - **Action name** — a service-owned, namespaced action declared by an
   approved artifact and permission-policy schema; it is not a kernel-wide
   enum.
@@ -149,15 +152,16 @@ scoping; MVP simply exercises a subset of it (marked inline below).
   request. The kernel treats its business content as opaque except for
   approved schema metadata, routing fields, content length, and content
   digest. **MVP carries only the schema version reference required for
-  authority (ILK-002); actual artifact content mediation is Post-MVP — see
-  [ILK-006](#ilk-006-artifacts).**
+  authority (ILK-002); actual artifact content mediation is Future Kernel —
+  see [ILK-006](#ilk-006-artifacts) and
+  [Section 11](#11-namespace-data-and-search-ownership).**
 - **Artifact schema** — a namespaced, versioned contract defined by the
-  service that owns an artifact type. **MVP** (publication already
+  service that owns an artifact type. **MVP Kernel** (publication already
   implemented under ILK-002).
 - **Permission-policy schema** — a namespaced, versioned declaration from a
   service describing the actions and permission fields meaningful for its
   artifacts. Administrators, not the defining service, control activation
-  and grants under that schema. **MVP.**
+  and grants under that schema. **MVP Kernel.**
 - **Administrative object** — kernel-owned security, connection, schema
   registration, policy activation, grant, routing, subscription, work,
   audit, replay, or idempotency state.
@@ -172,29 +176,31 @@ types for every invoice, document, model, medical record, or future
 service object. The kernel's eventual full object contract has a governed
 request carry or resolve at least:
 
-- a stable request ID — **MVP**;
-- authenticated source service, instance, and key IDs — **MVP**;
-- a namespaced action — **MVP**;
-- artifact type, schema name, schema version, and schema owner — **MVP**
-  (schema *reference* only; see ILK-006 for content mediation);
-- permission-policy schema name, version, and owner — **MVP**;
-- artifact ID or payload reference plus content digest — **Post-MVP**, not
-  carried by the request today (see [ILK-006](#ilk-006-artifacts));
-- correlation and optional causation IDs — **Post-MVP**, not carried by the
-  request today (see [ILK-005](#ilk-005-relationships)); and
-- creation, expiry, replay, and idempotency metadata — **MVP** (creation,
-  replay, and idempotency; explicit request expiry is Post-MVP).
+- a stable request ID — **MVP Kernel**;
+- authenticated source service, instance, and key IDs — **MVP Kernel**;
+- a namespaced action — **MVP Kernel**;
+- artifact type, schema name, schema version, and schema owner — **MVP
+  Kernel** (schema *reference* only; see ILK-006 for content mediation);
+- permission-policy schema name, version, and owner — **MVP Kernel**;
+- artifact ID or payload reference plus content digest — **Future Kernel**,
+  not carried by the request today (see [ILK-006](#ilk-006-artifacts));
+- correlation and optional causation IDs — **Future Kernel**, not carried
+  by the request today (see [ILK-005](#ilk-005-relationships)); and
+- creation, expiry, replay, and idempotency metadata — **MVP Kernel**
+  (creation, replay, and idempotency; explicit request expiry is Future
+  Kernel).
 
 A service MAY publish new artifact and permission-policy schemas in its own
 namespace. Publication MUST NOT activate a schema, authorize the publisher,
 or create a grant. A security administrator MUST explicitly approve schema
 versions and bind identities to permissions. The kernel MUST make and
-retain the final allow-or-deny result. **MVP** — implemented in full.
+retain the final allow-or-deny result. **MVP Kernel** — implemented in
+full.
 
 ### Authoritative state boundary
 
-**MVP** — this entire boundary is load-bearing for the vertical slice and
-is already true by construction:
+**MVP Kernel** — this entire boundary is load-bearing for the vertical
+slice and is already true by construction:
 
 - Every recoverable kernel fact MUST be stored in PostgreSQL before success
   is reported or an externally visible governed effect is released.
@@ -214,6 +220,10 @@ is already true by construction:
 - In-memory repositories MAY exist only as isolated test doubles and MUST
   NOT be used in production wiring.
 
+This is a statement about **kernel-owned** state only. It says nothing
+about where a domain service stores *its own* authoritative data — see
+[Section 11](#11-namespace-data-and-search-ownership).
+
 ### Routing ledger
 
 The kernel separates immutable intent, interest, destination progress, and
@@ -221,20 +231,19 @@ exclusive ownership:
 
 | Record | Identity and purpose | Multiplicity | Scope |
 | --- | --- | --- | --- |
-| Request | Source-authenticated intent and matching metadata | One accepted record per source/request ID | MVP |
-| Subscription | A stable service's declared interest and wakeup cursor | Zero or more matches per request | MVP (inclusive only; cursor is a simple active-set match, not a durable replay cursor — see ILK-010) |
-| Request route | Deduplication and completion boundary for an exclusive group or inclusive destination | At most one per request/group or request/destination | MVP (inclusive only) |
-| Route transition | Append-only evidence of ready, claimed, completed, paused, or terminal progress, including the applicable subscription | Many per route | Post-MVP as a dedicated ledger — MVP gets equivalent minimum evidence from the route and work-claim tables' own append-only status history, which already satisfies the vertical slice's audit acceptance criteria (see [ILK-008](#ilk-008-audit)) |
-| Work claim | Exclusive lease naming the worker currently handling a route | At most one active claim per route; history retained | MVP |
+| Request | Source-authenticated intent and matching metadata | One accepted record per source/request ID | MVP Kernel |
+| Subscription | A stable service's declared interest and wakeup cursor | Zero or more matches per request | MVP Kernel (inclusive only; cursor is a simple active-set match, not a durable replay cursor — see ILK-010) |
+| Request route | Deduplication and completion boundary for an exclusive group or inclusive destination | At most one per request/group or request/destination | MVP Kernel (inclusive only) |
+| Route transition | Append-only evidence of ready, claimed, completed, paused, or terminal progress, including the applicable subscription | Many per route | Future Kernel as a dedicated ledger — MVP gets equivalent minimum evidence from the route and work-claim tables' own append-only status history, which already satisfies the vertical slice's audit acceptance criteria (see [ILK-008](#ilk-008-audit)) |
+| Work claim | Exclusive lease naming the worker currently handling a route | At most one active claim per route; history retained | MVP Kernel |
 
 An accepted request with no matching subscription is **unrouted**, not
 failed. When a subscription matches, the kernel idempotently creates or
 wakes the request route for that stable destination. The kernel's
-next-work query uses active subscription state and its durable cursor to
-expose which incomplete routes are eligible; it does not select which one
-runs next or on which worker — that policy belongs to an external
-scheduler service (see
-[ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md)).
+eligible-route query uses active subscription state to expose which
+incomplete routes are eligible; it does not select which one runs next or
+on which worker — that policy belongs to an external scheduler service
+(see [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md)).
 The work-claim contract then atomically arbitrates whichever claim a
 scheduler requests: authorized, still eligible, unclaimed, and
 fencing-current, or rejected. A completion is scoped to that route and
@@ -243,8 +252,8 @@ parent request for any other destination.
 
 ### Transaction boundary
 
-**MVP** — for an accepted mutating request, the following effects MUST
-form one atomic transaction where applicable:
+**MVP Kernel** — for an accepted mutating request, the following effects
+MUST form one atomic transaction where applicable:
 
 1. validate identity, signature, freshness, replay, communication
    admission, request shape, schema activation, authority, and
@@ -253,41 +262,127 @@ form one atomic transaction where applicable:
 3. apply fixed artifact-storage, routing, subscription, connection, or
    work coordination effects;
 4. append required security, administration, and mediation audit records;
-5. append promised kernel or approved service-schema events (Post-MVP —
-   see [ILK-009](#ilk-009-events); no step of the MVP vertical slice
-   promises an event yet); and
+5. append promised kernel or approved service-schema events (Future
+   Kernel — see [ILK-009](#ilk-009-events); no step of the MVP vertical
+   slice promises an event yet); and
 6. persist the idempotent result.
 
 The kernel reports success only after this transaction commits. Delivery
 of a committed event to a subscriber MAY occur asynchronously.
 
-## 3. MVP required capabilities
+## 3. MVP definition
+
+The **Minimum Viable Infernal Law Kernel** is the smallest kernel that can:
+
+1. prove the complete governed-work vertical slice in
+   [Section 4](#4-mvp-vertical-slice), end to end, against a real
+   PostgreSQL backend; and
+2. pass every required failure/recovery proof in
+   [Section 6](#6-mvp-failurerecovery-acceptance-tests).
+
+A capability that is real, useful, and even partially built is **not**
+automatically MVP. It is MVP if and only if the vertical slice cannot be
+proven without it. Everything else is preserved — never deleted — and
+classified into Sections 8 through 11 by who should own it long-term:
+Future Kernel, an external infrastructure service, or a domain service.
+
+This is a deliberately narrow test. It excludes, for example, exclusive
+delivery, generalized eligibility selectors, artifact content storage, and
+any scheduling policy — all real, all eventually kernel-or-service
+responsibilities, none required to prove the vertical slice works.
+
+## 4. MVP vertical slice
+
+The Minimum Viable Kernel exists once the kernel can prove this end-to-end
+path:
+
+1. An authenticated service submits a signed Request.
+2. The kernel verifies identity, signature, freshness, replay state, and
+   communication admission.
+3. The kernel constructs trusted authority facts.
+4. The kernel calls the external stateless policy evaluator.
+5. The evaluator returns allow/deny and the policy version evaluated.
+6. The kernel records the authority decision and remains the final
+   enforcement point.
+7. The Request is durably persisted in PostgreSQL.
+8. A basic active inclusive subscription matches it.
+9. The kernel creates one durable route.
+10. An external scheduler can query eligible routes.
+11. The scheduler proposes a route/worker assignment.
+12. The kernel atomically arbitrates ownership through claims, leases, and
+    fencing.
+13. The worker receives the governed work through the kernel.
+14. The worker returns completion/result state through the kernel.
+15. Required request, authority, route, claim, completion, and audit
+    evidence remains durable across restart.
+
+That vertical slice is the MVP. [Section 6](#6-mvp-failurerecovery-acceptance-tests)
+lists the specific failure/recovery proofs `v0.1.0` also requires.
+[Section 7](#7-current-mvp-implementation-status) is the short, current
+answer to "what exactly is left before tagging `v0.1.0`."
+
+Each step maps onto a concrete kernel mechanism and the test that proves
+it:
+
+| Step | Mechanism | Proof today |
+| --- | --- | --- |
+| 1. Authenticated service submits a signed Request | `POST /v1/requests`, `ServiceRequestVerifier` | `tests/service_request_signature_contract.rs` |
+| 2. Kernel verifies identity, signature, freshness, replay, admission | Fixed HTTP Message Signature profile (ILK-001) + default-deny admission + atomic nonce/request-ID replay | `tests/identity_contract.rs`, `tests/service_request_signature_contract.rs`, `tests/admission_contract.rs`, `tests/replay_protection_contract.rs`, `tests/service_request_gate_contract.rs` |
+| 3. Kernel constructs trusted authority facts | `PolicyFacts::for_request_acceptance` | `tests/authority_contract.rs` |
+| 4. Kernel calls the external stateless policy evaluator | `HttpPolicyEvaluator` → Inquisitor | `tests/authority_contract.rs`, `infernal-inquisitor-simple`'s own test suite |
+| 5. Evaluator returns allow/deny and the policy version evaluated | `HttpPolicyEvaluator` response parsing | Colocated tests in `src/infrastructure/http_policy_evaluator.rs` |
+| 6. Kernel records the authority decision and remains final enforcement | `AuthorityService::authorize` + `AuthorityDecisionRecorder` | `every_authorize_call_durably_records_exactly_one_decision`, `authorize_fails_rather_than_return_an_unrecorded_decision` |
+| 7. Request is durably persisted in PostgreSQL | `PostgresRequestRepository` | `tests/postgres_request_repository.rs` (ignored, live-DB) |
+| 8. A basic active inclusive subscription matches it | `SubscriptionRepository::find_active_by_event_type` | `tests/subscription_contract.rs::find_active_by_event_type_matches_across_services_and_excludes_disabled` |
+| 9. Kernel creates one durable route | `SubscriptionRouter` → `RouteService::materialize` | `tests/route_materialization_contract.rs`, `tests/postgres_route_repository.rs` (ignored, live-DB) |
+| 10. External scheduler can query eligible routes | `GET /v1/routes/eligible` → `EligibleRouteQuery` | `tests/route_materialization_contract.rs`, `tests/work_claim_contract.rs`, colocated `eligible_route_routes` tests in `src/http.rs`, `tests/postgres_route_repository.rs`/`tests/postgres_work_claim_repository.rs` (ignored, live-DB) |
+| 11. Scheduler proposes a route/worker assignment | `POST /v1/routes/{route_id}/claims` | `tests/work_claim_contract.rs`, colocated `work_claim_routes` HTTP tests in `src/http.rs` |
+| 12. Kernel atomically arbitrates ownership (claims/leases/fencing) | `WorkClaimService::claim` | `tests/work_claim_contract.rs`, `tests/postgres_work_claim_repository.rs` (ignored, live-DB) |
+| 13. Worker receives the governed work through the kernel | **Gap — see below** | — |
+| 14. Worker returns completion/result state through the kernel | `POST /v1/claims/{id}/complete` | `tests/work_claim_contract.rs::completion_is_terminal_and_cannot_be_renewed_or_released_afterward` |
+| 15. Required evidence remains durable across restart | `protect_work_claim()` trigger + append-only tables | `tests/postgres_work_claim_repository.rs`'s `assert_database_guards`; see [Section 6](#6-mvp-failurerecovery-acceptance-tests) for the full-restart proof |
+
+**Step 13 is a real, currently open gap**, not yet reflected anywhere else
+in this document before this pass: a claimed route's `WorkClaimResponse`
+carries `claim_id`, `route_id`, `worker_service_id`, `worker_instance_id`,
+`fencing_token`, `status`, `claimed_at`, and `lease_expires_at` — never the
+original Request's action, scope, or schema. The eligible-route listing
+(`RouteResponse`) adds `request_id`, but the only Request-read contract,
+`GET /v1/requests/{id}`, is scoped to the request's *source* service
+(`RequestRepository::find(source_service, request_id)`); a destination
+service calling it gets an indistinguishable 404. **A worker that
+successfully claims a route today has no kernel-mediated way to learn what
+it was asked to do.** This blocks the vertical slice from being a genuinely
+complete loop, even though every step around it (claim, complete, fencing)
+is independently proven. See [Section 7](#7-current-mvp-implementation-status).
+
+## 5. MVP capabilities
 
 Every `ILK-*` identifier from the original requirements draft is preserved.
-Each capability below is tagged **MVP**, **Split** (part of it gates
-`v0.1.0`, part is Kernel 1.0), or **Post-MVP / Kernel 1.0** (the whole
-capability is deferred — its full text lives in
-[Section 7](#7-future-kernel-kernel-10), not repeated here).
+Each capability below is tagged **MVP Kernel**, **Split** (part of it gates
+`v0.1.0`, part is Kernel 1.0), or **Future Kernel** (the whole capability
+is deferred — its full text lives in
+[Section 8](#8-future-kernel-kernel-10), not repeated here).
 
 | ID | Capability | Scope for v0.1.0 |
 | --- | --- | --- |
-| ILK-001 | Identity | **MVP** |
+| ILK-001 | Identity | **MVP Kernel** |
 | ILK-002 | Authority | **Split** — request-acceptance authority is MVP; per-route re-authorization and schema-lifecycle administration UI are Kernel 1.0 |
-| ILK-003 | Requests | **Split** — immutable durable requests and inclusive-only route materialization are MVP; correlation, exclusive groups, route history, and backlog matching are Kernel 1.0 |
-| ILK-004 | Versions | **MVP** (the append-only/immutability invariant itself; administrative lifecycle workflow is external — see ILK-002) |
-| ILK-005 | Relationships | **Post-MVP / Kernel 1.0** — unimplemented, not required by the vertical slice |
-| ILK-006 | Artifacts | **Post-MVP / Kernel 1.0** + External storage — unimplemented, not required by the vertical slice |
+| ILK-003 | Requests | **Split** — immutable durable requests and inclusive-only route materialization are MVP; a destination-scoped read of request content is an **open MVP gap** (Section 4, step 13); correlation, exclusive groups, route history, and backlog matching are Kernel 1.0 |
+| ILK-004 | Versions | **MVP Kernel** (the append-only/immutability invariant itself; administrative lifecycle workflow is external — see ILK-002) |
+| ILK-005 | Relationships | **Future Kernel** — unimplemented, not required by the vertical slice |
+| ILK-006 | Artifacts | **Future Kernel** + domain-owned by default — unimplemented, not required by the vertical slice; see [Section 11](#11-namespace-data-and-search-ownership) |
 | ILK-007 | Decisions | **Split** — the authority decision record is MVP; a generalized Decision type spanning routing/pause/assignment is Kernel 1.0 |
-| ILK-008 | Audit | **MVP** (minimum evidence to reconstruct the vertical slice already exists per-capability; a unified audit log is Kernel 1.0) |
-| ILK-009 | Events | **Post-MVP / Kernel 1.0** — unimplemented, not required by the vertical slice |
+| ILK-008 | Audit | **MVP Kernel** (minimum evidence to reconstruct the vertical slice already exists per-capability; a unified audit log is Kernel 1.0) |
+| ILK-009 | Events | **Future Kernel** — unimplemented, not required by the vertical slice |
 | ILK-010 | Subscriptions | **Split** — inclusive create/list/disable/materialize is MVP; exclusive groups, `all_of` selectors, backlog matching, cursors, route history are Kernel 1.0 |
 | ILK-011 | Work claims | **Split** — claim/renew/release/complete with fencing is MVP (done); the eligible-route query is MVP (done); administrative forced revocation is Kernel 1.0 |
 | ILK-012 | Idempotency | **Split** — request-level idempotency (via ILK-003) is MVP; idempotency for artifact writes/events is Kernel 1.0, blocked on ILK-006/009 |
-| ILK-013 | Mediation | **MVP** — structural invariant, already true by construction |
+| ILK-013 | Mediation | **MVP Kernel** — structural invariant, already true by construction |
 
 ### ILK-001: Identity
 
-**Scope: MVP** (in full).
+**Scope: MVP Kernel** (in full).
 
 - Implementation: `src/kernel/identity.rs`
 - Independent contract test: `tests/identity_contract.rs`
@@ -344,11 +439,10 @@ Implementation status:
   headers, ordered signature, replay, and admission checks, typed caller
   context, and sanitized fail-closed responses.
 - Complete: ILK-002 authority and implemented governed subscription/
-  request/route/claim handlers behind the middleware (was "Pending" in an
-  earlier revision).
-- Post-MVP / Kernel 1.0: signed lease-renewal transport; correctness under
+  request/route/claim handlers behind the middleware.
+- Future Kernel: signed lease-renewal transport; correctness under
   multiple kernel replicas for `GET /v1/kernel-identity` (see
-  [Section 7](#7-future-kernel-kernel-10)).
+  [Section 8](#8-future-kernel-kernel-10)).
 
 See the [direct service protocol](direct-service-protocol.md) and
 [ADR-0003](decisions/0003-direct-signed-service-rest.md).
@@ -359,13 +453,13 @@ Instance key and discovery lifecycle is specified by
 
 **Scope: Split.**
 
-**MVP** covers everything needed to authorize step 4–5 of the vertical
-slice: a real allow/deny decision from the external evaluator for request
+**MVP**: everything needed to authorize steps 3–6 of the vertical slice: a
+real allow/deny decision from the external evaluator for request
 acceptance, fail-closed on denial or evaluator failure, and durable,
 version-pinned decision recording.
 
-**Post-MVP / Kernel 1.0**: a second, destination-scoped authority decision
-that separately re-authorizes a route before it is exposed, claimed, or
+**Kernel 1.0**: a second, destination-scoped authority decision that
+separately re-authorizes a route before it is exposed, claimed, or
 delivered (the domain primitive, `PolicyFacts::for_route`, already exists
 and is contract-tested; it is simply not yet wired into any HTTP route),
 and administrator-facing schema-activation workflow/UI (the underlying
@@ -382,7 +476,7 @@ Invariants:
   source, namespaced action, artifact type and schema version,
   permission-policy schema version, artifact or scope identifiers, and
   relevant administrative grants.
-- **Post-MVP / Kernel 1.0** — Route authority MUST separately consider the
+- **Kernel 1.0** — Route authority MUST separately consider the
   kernel-derived destination, matching subscription, and current
   destination-scoped grants before the route is exposed, claimed, or
   delivered. MVP instead enforces route/claim ownership structurally (the
@@ -397,7 +491,7 @@ Invariants:
   bypassing kernel mediation.
 - **MVP** — Publishing a schema MUST NOT activate it or grant any identity
   permission.
-- **MVP** (mechanism) / **Post-MVP** (administrative UI) — Only an
+- **MVP** (mechanism) / **Kernel 1.0** (administrative UI) — Only an
   authorized security administrator MAY approve, suspend, supersede, or
   retire a schema version and create, change, or revoke grants under it.
 - **MVP** — A service MUST NOT authorize itself merely because it owns the
@@ -420,7 +514,7 @@ Invariants:
   evaluation contract with different fact bundles rather than two separate
   integrations. The shared contract and both fact-bundle constructors are
   MVP-complete; only the second decision's live wiring into route
-  exposure/claiming is Post-MVP.
+  exposure/claiming is Kernel 1.0.
 
 Acceptance criteria:
 
@@ -438,7 +532,7 @@ Acceptance criteria:
   action, artifact schema, policy schema, applicable grant, and
   administrator-controlled policy revision, plus the route destination and
   subscription when the decision is destination-specific. **MVP** for the
-  request-acceptance case; the destination-specific case is Post-MVP,
+  request-acceptance case; the destination-specific case is Kernel 1.0,
   pending the route-authority wiring above.
 
 Implementation status:
@@ -503,7 +597,7 @@ Implementation status:
   transport) can verify a kernel-signed message without static
   configuration that breaks on every kernel restart (ADR-0014). Correct
   behavior behind multiple kernel replicas remains a Kernel 1.0 follow-up
-  (see [Section 7](#7-future-kernel-kernel-10)).
+  (see [Section 8](#8-future-kernel-kernel-10)).
 - The outbound signed-call machinery itself now exists outside the kernel:
   `infernal-client-rs` ([ADR-0012](decisions/0012-rust-first-client-sdk-family-over-signed-rest.md))
   implements the signing side of ADR-0003 and verifying a kernel identity
@@ -555,7 +649,7 @@ Implementation status:
   activates a schema or grants its publisher permission (ILK-002's own
   wording), so this route requires no ILK-002 authority decision, only
   authentication.
-- Post-MVP / Kernel 1.0: wiring `PolicyFacts::for_route` into an actual
+- Kernel 1.0: wiring `PolicyFacts::for_route` into an actual
   destination-scoped re-authorization at route exposure or claim time
   (today, ownership matching stands in for it — see ILK-011); and
   administrator-driven schema activation exposed as a kernel contract
@@ -580,9 +674,18 @@ Implementation status:
 retry, rejection of ID reuse for different content, and idempotent
 materialization of inclusive routes for actively-matching subscriptions.
 
-**Post-MVP / Kernel 1.0**: correlation/causation relationships (full
-realization is [ILK-005](#ilk-005-relationships)), exclusive-group routes
-and consumer-group semantics, append-only route transition history, and
+**Open MVP gap** (identified in [Section 4](#4-mvp-vertical-slice), step
+13): there is no destination-scoped read of an accepted request. `find` is
+scoped to `(source_service, request_id)` only
+(`RequestRepository::find`/`PostgresRequestRepository`'s `FIND_SQL`); a
+route's destination service — the worker that just claimed the route — has
+no kernel-mediated way to read the action, scope, or schema of the request
+it was routed to handle. This is required for the vertical slice to be a
+genuinely complete loop, not merely a Kernel 1.0 enhancement.
+
+**Kernel 1.0**: correlation/causation relationships (full realization is
+[ILK-005](#ilk-005-relationships)), exclusive-group routes and
+consumer-group semantics, append-only route transition history, and
 backlog matching (a subscription committed *after* a request does not yet
 retroactively see it — MVP's vertical slice assumes the subscription is
 already active when the request is submitted).
@@ -598,7 +701,7 @@ Invariants:
   become durable before the kernel reports acceptance.
 - **MVP** — A request MUST identify its source, namespaced action,
   artifact descriptor, permission-policy schema reference, and creation
-  time. (Correlation metadata is Post-MVP — see ILK-005.)
+  time. (Correlation metadata is Kernel 1.0 — see ILK-005.)
 - **MVP** — A request MUST NOT name or expose a concrete destination
   service. The kernel derives destination routes only from authorized
   matching subscriptions.
@@ -608,13 +711,13 @@ Invariants:
 - **MVP** — A request without an eligible matching subscriber MUST remain
   durably unrouted; it MUST NOT be rejected or silently discarded merely
   because no subscriber exists yet.
-- **MVP** (inclusive) / **Post-MVP** (exclusive) — A matching subscription
-  MUST materialize at most one exclusive route for the request/consumer
-  group or one inclusive route for the request/stable destination. Those
-  unique keys MUST make repeated scans, retries, and subscription wakeups
-  idempotent.
+- **MVP** (inclusive) / **Kernel 1.0** (exclusive) — A matching
+  subscription MUST materialize at most one exclusive route for the
+  request/consumer group or one inclusive route for the request/stable
+  destination. Those unique keys MUST make repeated scans, retries, and
+  subscription wakeups idempotent.
 - **MVP** — One request MAY have routes to many destination services.
-  **Post-MVP** — every route MUST have its own append-only transition
+  **Kernel 1.0** — every route MUST have its own append-only transition
   history (today a route has state but not a dedicated transition-history
   ledger; see the routing-ledger table in Section 2).
 - **MVP** — Completing one route MUST record the subscription and
@@ -626,6 +729,9 @@ Invariants:
 - **MVP** — A source MUST NOT receive destination discovery information.
   The kernel owns subscriber discovery, instance selection, handshake, and
   delivery.
+- **Open MVP gap** — The route's own destination service MUST be able to
+  read enough of the request (action, scope, schema references) to
+  actually perform the work it claimed. Not yet implemented — see above.
 - **MVP** — Request acceptance MUST NOT imply authorization, delivery,
   work completion, or acceptance of the artifact by the destination
   service.
@@ -642,19 +748,21 @@ Acceptance criteria:
   artifact digest, or payload is rejected deterministically. **MVP.**
 - The kernel can route a previously accepted request without interpreting
   its service-specific artifact content. **MVP.**
+- A route's destination service can read the request it was routed for.
+  **Open MVP gap** — not yet implemented.
 - A request accepted before its matching subscription exists becomes
   eligible for delivery after that subscription is committed, without
-  source resubmission. **Post-MVP** (backlog matching — not implemented;
+  source resubmission. **Kernel 1.0** (backlog matching — not implemented;
   MVP requires the subscription to already be active at submission time).
 - A subscription-creation race cannot lose a matching pending request or
-  create more than one accepted request record. **Post-MVP**, coupled to
+  create more than one accepted request record. **Kernel 1.0**, coupled to
   backlog matching above.
 - Two matching destination services produce two independently tracked
   routes; completing either route leaves the other route eligible for
   work. **MVP** (proven for inclusive routes today).
 - Replaying backlog scans or wakeups cannot create duplicate work for an
   existing exclusive-group or inclusive-destination route. **MVP** for
-  inclusive; **Post-MVP** for exclusive-group.
+  inclusive; **Kernel 1.0** for exclusive-group.
 
 Implementation status:
 
@@ -689,9 +797,12 @@ Implementation status:
   response with it unchanged, so reusing it is what makes submission
   idempotent under retry without a second, redundant identifier.
   Submission is authorized by a real ILK-002 decision built from the
-  request's own action, scope, and schema versions. `GET /v1/requests/{id}`
-  reads back only the caller's own accepted request; another service's
-  request looks identical to one that does not exist.
+  request's own action, scope, and schema versions.
+- Complete: `GET /v1/requests/{id}` reads back only the caller's own
+  accepted request when the caller is the *source* — another service's
+  request looks identical to one that does not exist. **This is also the
+  open MVP gap above**: the same guarantee does not yet exist for a
+  request's *destination* service.
 - Complete (first slice — this is the MVP-required piece): `Route`,
   `RouteRepository`, and `RouteService` (`src/kernel/requests.rs`) — an
   accepted request's independent, idempotently-materialized destinations,
@@ -699,18 +810,22 @@ Implementation status:
   state, transition history, or work claim exists on a route itself — it
   records only that a destination is eligible; a route's own claim history
   (ILK-011) is what currently stands in for transition evidence.
-- Post-MVP / Kernel 1.0: correlation relationships, exclusive-group routes
-  and their consumer-group semantics, route transition history, and
+- Pending (MVP, not Kernel 1.0): a destination-scoped request read, or
+  equivalent content delivered through the route/claim response, so a
+  worker that claims a route can learn what to do. See
+  [Section 7](#7-current-mvp-implementation-status).
+- Kernel 1.0: correlation relationships, exclusive-group routes and their
+  consumer-group semantics, route transition history, and
   subscription-triggered backlog routing (a subscription committed after a
   request does not yet retroactively see it).
 
 ### ILK-004: Versions
 
-**Scope: MVP** — the append-only/immutability invariant is load-bearing
-for the vertical slice (schema version pinning, decision pinning) and is
-already true by construction wherever it is exercised. Administrative
-lifecycle *workflow* (as opposed to the underlying immutability) is
-external tooling — see [ILK-002](#ilk-002-authority).
+**Scope: MVP Kernel** — the append-only/immutability invariant is
+load-bearing for the vertical slice (schema version pinning, decision
+pinning) and is already true by construction wherever it is exercised.
+Administrative lifecycle *workflow* (as opposed to the underlying
+immutability) is external tooling — see [ILK-002](#ilk-002-authority).
 
 Invariants:
 
@@ -744,21 +859,21 @@ their status sections above.
 
 ### ILK-005: Relationships
 
-**Scope: Post-MVP / Kernel 1.0 — the entire capability.** Nothing here is
+**Scope: Future Kernel — the entire capability.** Nothing here is
 implemented, and the MVP vertical slice does not require it (no step needs
 correlation/causation querying). Full text preserved in
-[Section 7](#7-future-kernel-kernel-10).
+[Section 8](#8-future-kernel-kernel-10).
 
 ### ILK-006: Artifacts
 
-**Scope: Post-MVP / Kernel 1.0 + External infrastructure — the entire
-capability.** `Request` does not carry artifact content, an artifact ID, or
-a payload reference today — only the schema *version reference* used for
-authority (which is ILK-002's responsibility, already MVP-complete). Actual
-artifact content mediation is not required by the vertical slice. Full
-text preserved in [Section 7](#7-future-kernel-kernel-10); the physical
-storage question is discussed in
-[Section 8](#8-external-service-responsibilities).
+**Scope: Future Kernel + domain-owned by default — the entire capability.**
+`Request` does not carry artifact content, an artifact ID, or a payload
+reference today — only the schema *version reference* used for authority
+(which is ILK-002's responsibility, already MVP-complete). Actual artifact
+content mediation is not required by the vertical slice. Full text
+preserved in [Section 8](#8-future-kernel-kernel-10); the ownership
+question (kernel-owned governed evidence vs. domain-owned content) is
+discussed fully in [Section 11](#11-namespace-data-and-search-ownership).
 
 ### ILK-007: Decisions
 
@@ -770,9 +885,9 @@ capability describes (durable record, type, outcome, responsible party,
 request ID, time, security/schema revisions — see `AuthorityDecision` and
 `AuthorityDecisionRecorder` under ILK-002).
 
-**Post-MVP / Kernel 1.0**: a generalized, first-class `Decision` record
-type spanning routing, pause, and assignment decisions uniformly. Today,
-route and work-claim state changes are their own append-only tables
+**Kernel 1.0**: a generalized, first-class `Decision` record type spanning
+routing, pause, and assignment decisions uniformly. Today, route and
+work-claim state changes are their own append-only tables
 (`request_routes`, `work_claims`), which already satisfy this document's
 audit acceptance criteria for the vertical slice without needing a shared
 abstraction — see [ILK-008](#ilk-008-audit).
@@ -791,7 +906,7 @@ Invariants:
   administrative objects. An authority decision produced by an external
   policy evaluator additionally records that evaluator's identity and the
   policy bundle/version it claimed to evaluate (ADR-0013). **MVP** for
-  authority decisions; **Post-MVP** for a generalized type covering
+  authority decisions; **Kernel 1.0** for a generalized type covering
   routing/work decisions too.
 - Reversal or supersession MUST create another decision linked to the
   earlier record.
@@ -800,7 +915,7 @@ Acceptance criteria:
 
 - A caller can reconstruct why a request was admitted, denied, routed,
   paused, delivered, or assigned using recorded inputs and policy
-  versions. **MVP** for admit/deny; **Post-MVP** for a uniform routed/
+  versions. **MVP** for admit/deny; **Kernel 1.0** for a uniform routed/
   paused/delivered/assigned reconstruction API (today this evidence is
   reconstructable by joining `request_routes` and `work_claims`, not
   through one generalized decision query).
@@ -811,12 +926,12 @@ Acceptance criteria:
 
 ### ILK-008: Audit
 
-**Scope: MVP** — the minimum audit evidence needed to reconstruct the
-vertical slice already exists, spread across each capability's own
+**Scope: MVP Kernel** — the minimum audit evidence needed to reconstruct
+the vertical slice already exists, spread across each capability's own
 append-only table (replay audit, admission audit, authority decisions,
 subscription history, route/claim status history). A single unified audit
-log across all capabilities, including ones that are themselves Post-MVP
-(artifact mediation, events), is Kernel 1.0.
+log across all capabilities, including ones that are themselves Future
+Kernel (artifact mediation, events), is Kernel 1.0.
 
 Invariants:
 
@@ -826,8 +941,8 @@ Invariants:
 - Each record MUST include its event type, request ID where applicable,
   source service, instance and key, namespaced action, artifact and
   permission schema versions, administrative revision, time, outcome, and
-  correlation ID (correlation ID is Post-MVP — see ILK-005). Route records
-  additionally include destination service and subscription.
+  correlation ID (correlation ID is Kernel 1.0 — see ILK-005). Route
+  records additionally include destination service and subscription.
 - Schema publication, activation, suspension, supersession, grant,
   revocation, connection, routing, replay, delivery, and work decisions
   MUST be auditable.
@@ -842,9 +957,9 @@ Acceptance criteria:
 
 ### ILK-009: Events
 
-**Scope: Post-MVP / Kernel 1.0 — the entire capability.** Unimplemented;
-the vertical slice does not publish or consume typed events. Full text
-preserved in [Section 7](#7-future-kernel-kernel-10).
+**Scope: Future Kernel — the entire capability.** Unimplemented; the
+vertical slice does not publish or consume typed events. Full text
+preserved in [Section 8](#8-future-kernel-kernel-10).
 
 ### ILK-010: Subscriptions
 
@@ -854,14 +969,14 @@ preserved in [Section 7](#7-future-kernel-kernel-10).
 subscriptions already active at submission time, and idempotent route
 materialization (all Complete today).
 
-**Post-MVP / Kernel 1.0**: exclusive consumer groups, `all_of` state
-selectors, backlog matching, durable delivery cursors, route transition
-history, and hardened production outbound handshake transport.
+**Kernel 1.0**: exclusive consumer groups, `all_of` state selectors,
+backlog matching, durable delivery cursors, route transition history, and
+hardened production outbound handshake transport.
 
 **External infrastructure**: capacity-aware delivery, worker/node
 placement, and retry-timing policy belong to Taskmaster, not the kernel —
 see [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md)
-and [Section 8](#8-external-service-responsibilities).
+and [Section 9](#9-external-infrastructure-services).
 
 - Implementation: `src/kernel/subscriptions.rs`
 - Independent contract test: `tests/subscription_contract.rs`
@@ -875,18 +990,19 @@ Invariants:
 - **MVP** — A request-receiving subscription MUST declare `exclusive` or
   `inclusive` delivery semantics; an omitted or unknown mode MUST fail
   closed.
-- **Post-MVP / Kernel 1.0** — An exclusive subscription MUST declare an
-  approved consumer-group identity. All services in that group compete for
-  one request/group route and one completion; failover reassigns that
-  route rather than resubmitting the request.
+- **Kernel 1.0** — An exclusive subscription MUST declare an approved
+  consumer-group identity. All services in that group compete for one
+  request/group route and one completion; failover reassigns that route
+  rather than resubmitting the request.
 - **MVP** — An inclusive subscription MUST create an independent route for
   every matching stable destination service within the request's routing
   window.
-- **Post-MVP / Kernel 1.0** — A subscription MAY require multiple typed
-  state predicates. The minimum semantics MUST be `all_of`, evaluated from
-  one consistent committed snapshot; every predicate must be true before a
+- **Kernel 1.0** — A subscription MAY require multiple typed state
+  predicates. The minimum semantics MUST be `all_of`, evaluated from one
+  consistent committed snapshot; every predicate must be true before a
   route becomes eligible. (Kept as a small deterministic declarative
-  mechanism over trusted committed state — not a business rules engine.)
+  mechanism over trusted committed state — not a business rules engine;
+  see [Section 11](#11-namespace-data-and-search-ownership).)
 - **MVP** — Subscription modes, group identities, selectors, predicate
   sets, referenced schema versions, and routing-window policies MUST be
   immutable after creation. Replacement creates a new version and
@@ -894,27 +1010,27 @@ Invariants:
 - **MVP** — Selector predicates MUST be declarative approved fields and
   fixed operators; caller-supplied SQL, code, database identifiers, and
   executable expressions are forbidden.
-- **Post-MVP / Kernel 1.0** — Committing a subscription MUST make
-  pre-existing matching pending requests eligible for routing;
-  subscription timing MUST NOT determine whether a request is retained.
-  (This is backlog matching — MVP's vertical slice requires the
-  subscription to already be active before the request is submitted.)
+- **Kernel 1.0** — Committing a subscription MUST make pre-existing
+  matching pending requests eligible for routing; subscription timing MUST
+  NOT determine whether a request is retained. (This is backlog matching —
+  MVP's vertical slice requires the subscription to already be active
+  before the request is submitted.)
 - **MVP** — The subscription registry supplies eligible destination
   services; it MUST NOT be overwritten with route progress or work
-  history. **Post-MVP** — a durable wakeup cursor (today, matching is a
+  history. **Kernel 1.0** — a durable wakeup cursor (today, matching is a
   simple active-set query, not a cursor-based scan).
-- **Post-MVP / Kernel 1.0** — The kernel MUST use a durable subscription
-  cursor or equivalent wakeup marker to find both new and pre-existing
-  matching requests without loss.
+- **Kernel 1.0** — The kernel MUST use a durable subscription cursor or
+  equivalent wakeup marker to find both new and pre-existing matching
+  requests without loss.
 - **MVP** — Subscription changes MUST be authorized and audited.
 - **External infrastructure** — Pausing or deferring delivery for
   readiness, health, or capacity reasons is scheduler policy (ADR-0011)
   and MUST NOT delete or disable durable subscription state.
-- **Post-MVP / Kernel 1.0** — Every kernel instance MUST continuously
-  discover reachable instances for active subscriptions and complete a
-  fresh, mutual proof-of-possession handshake before delivering to an
-  instance. (The discovery/handshake mechanism exists; production-hardened
-  outbound transport is the remaining piece.)
+- **Kernel 1.0** — Every kernel instance MUST continuously discover
+  reachable instances for active subscriptions and complete a fresh,
+  mutual proof-of-possession handshake before delivering to an instance.
+  (The discovery/handshake mechanism exists; production-hardened outbound
+  transport is the remaining piece.)
 
 Acceptance criteria:
 
@@ -924,7 +1040,7 @@ Acceptance criteria:
 - With no matching subscription, an accepted request remains durably
   pending. Creating an eligible matching subscription later exposes that
   backlog to the subscriber without requiring the source to retry or know
-  the subscriber's runtime identity. **Post-MVP** (backlog matching).
+  the subscriber's runtime identity. **Kernel 1.0** (backlog matching).
 - The kernel's eligibility query returns incomplete routes filtered by
   active subscription, authorization, and handshake state, excluding
   completed routes and routes protected by an active work claim. An
@@ -938,24 +1054,23 @@ Acceptance criteria:
   routes that have no current, unexpired active claim. It does not
   re-check subscription-active or handshake state at query time (a route
   only exists because both were true at materialization time) — doing so
-  is a **Post-MVP / Kernel 1.0** refinement, not a gap in the query
-  existing at all.
+  is a **Kernel 1.0** refinement, not a gap in the query existing at all.
 - If an exclusive destination instance or service fails, its assignment
   lease expires and the same route can be fenced and reassigned to
   another eligible service in the consumer group. No new request is
-  created. **Post-MVP** (exclusive groups); the underlying fence/lease
+  created. **Kernel 1.0** (exclusive groups); the underlying fence/lease
   mechanism is MVP-complete for the inclusive case (ILK-011).
 - A stale worker cannot renew, release, or complete a reassigned route
   because every mutation requires the current fencing token. **MVP**
   (proven for work claims today; "route revision" and "assignment ID" as
-  separate concepts from the fencing token are Post-MVP — see ILK-011).
+  separate concepts from the fencing token are Kernel 1.0 — see ILK-011).
 - Concurrent evaluation produces at most one exclusive request/group route
   or one inclusive request/destination route. Exactly one active
   assignment, one active claim, and one successful completion may exist
-  per route. **MVP** for inclusive; **Post-MVP** for exclusive-group.
+  per route. **MVP** for inclusive; **Kernel 1.0** for exclusive-group.
 - The selector version and state revisions used for each eligibility
   decision remain queryable; later state mutations do not rewrite prior
-  decisions. **Post-MVP** (coupled to `all_of` selectors).
+  decisions. **Kernel 1.0** (coupled to `all_of` selectors).
 - Disabling a subscription prevents new deliveries without deleting its
   history. **MVP.**
 - A scheduler deferring claims for saturation, stale health, or lack of
@@ -965,7 +1080,7 @@ Acceptance criteria:
   the deferral/retry policy itself is Taskmaster's, not the kernel's.
 - One unreachable subscriber does not prevent kernel startup or discovery
   of other subscribers; its delivery remains paused and is retried with
-  backoff. **Post-MVP** (production handshake transport hardening).
+  backoff. **Kernel 1.0** (production handshake transport hardening).
 
 Implementation status:
 
@@ -1009,20 +1124,19 @@ Implementation status:
   — the request is already durably accepted (ILK-003 requires acceptance
   to not depend on subscription state) — it is logged and naturally
   retried if the client retries.
-- Post-MVP / Kernel 1.0: exclusive delivery with consumer groups,
-  immutable `all_of` state selectors, backlog matching (a subscription
-  committed *after* a request currently never finds it — only
-  subscriptions active at submission time are considered), route
-  transition history, delivery cursors, and production outbound handshake
-  transport.
 - Complete (this is MVP): the eligible-route query external scheduler
   services use (ADR-0011) — `GET /v1/routes/eligible`, backed by
   `EligibleRouteQuery` in `src/http.rs`. See ILK-011's own status below
   for the composition and its tests.
+- Kernel 1.0: exclusive delivery with consumer groups, immutable `all_of`
+  state selectors, backlog matching (a subscription committed *after* a
+  request currently never finds it — only subscriptions active at
+  submission time are considered), route transition history, delivery
+  cursors, and production outbound handshake transport.
 - External infrastructure: capacity-aware delivery, worker/node placement,
   and retry-timing policy. Those belong to an external scheduler service,
   not the kernel (ADR-0011) — see
-  [Section 8](#8-external-service-responsibilities).
+  [Section 9](#9-external-infrastructure-services).
 
 ### ILK-011: Work claims
 
@@ -1032,11 +1146,11 @@ Implementation status:
 active claim per route, and the minimal eligible-route query a scheduler
 needs to find something to claim (all Complete).
 
-**Post-MVP / Kernel 1.0**: administrator-authorized forced claim
-revocation (only expiry, release, and completion exist today — no
-admin-forced revoke), and distinguishing "route revision" and "assignment
-ID" from the fencing token as separate concepts (today deliberately
-conflated: the fencing token alone identifies the current claim).
+**Kernel 1.0**: administrator-authorized forced claim revocation (only
+expiry, release, and completion exist today — no admin-forced revoke), and
+distinguishing "route revision" and "assignment ID" from the fencing token
+as separate concepts (today deliberately conflated: the fencing token
+alone identifies the current claim).
 
 **External infrastructure**: which eligible route a worker should claim
 next, and any priority/capacity/ordering policy, belongs to Taskmaster —
@@ -1054,14 +1168,14 @@ Invariants:
   work can be recovered.
 - **MVP** — Only the current claim holder may complete or release claimed
   work.
-- **MVP** (fencing token) / **Post-MVP** (route revision, assignment ID as
-  distinct fields) — A claim MUST be bound to the route revision,
+- **MVP** (fencing token) / **Kernel 1.0** (route revision, assignment ID
+  as distinct fields) — A claim MUST be bound to the route revision,
   assignment ID, worker service and instance, lease, and monotonically
   increasing fencing token.
 - **MVP** — Route reassignment MUST occur only after atomic release,
   expiry, or an authorized revocation transition. Liveness observations
   alone MUST NOT silently transfer ownership. (Authorized *administrative*
-  revocation specifically is Post-MVP; expiry and release are MVP.)
+  revocation specifically is Kernel 1.0; expiry and release are MVP.)
 
 Acceptance criteria:
 
@@ -1107,10 +1221,10 @@ Implementation status:
   (`tests/work_claim_contract.rs`), independent of PostgreSQL.
 - Complete: the eligible-route query — `GET /v1/routes/eligible`, backed
   by `EligibleRouteQuery` in `src/http.rs`. It composes
-  `RouteRepository::list_for_destination` (ILK-003, new) with
-  `WorkClaimRepository::active_route_ids` (ILK-011, new, a bulk "which of
-  these routes have a live claim" read) without either kernel module
-  depending on the other's repository — the same compositional pattern
+  `RouteRepository::list_for_destination` (ILK-003) with
+  `WorkClaimRepository::active_route_ids` (ILK-011, a bulk "which of these
+  routes have a live claim" read) without either kernel module depending
+  on the other's repository — the same compositional pattern
   `SubscriptionRouter` uses to bridge ILK-010 and ILK-003. The destination
   queried is always the caller's own verified identity, never a request
   parameter, so a caller can only ever see its own eligible routes; it
@@ -1122,8 +1236,10 @@ Implementation status:
   `tests/postgres_work_claim_repository.rs`) and at the HTTP level
   (colocated `eligible_route_routes` tests in `src/http.rs`), including
   that a route with an expired claim becomes eligible again and that a
-  caller never sees another service's routes.
-- Post-MVP / Kernel 1.0: administrator-authorized forced claim revocation;
+  caller never sees another service's routes. **This query tells a
+  scheduler/worker *that* a route exists to claim, not *what* the request
+  behind it is** — that remaining gap belongs to ILK-003 (see above).
+- Kernel 1.0: administrator-authorized forced claim revocation;
   route-revision/assignment-ID distinctness (currently conflated with the
   fencing token as a deliberate simplification).
 - External infrastructure: any scheduling policy (which eligible route a
@@ -1141,9 +1257,9 @@ request-ID/fingerprint binding and safe-retry classification already
 provide (there is no separate ILK-012 implementation — this capability is
 realized entirely through ILK-003's mechanics).
 
-**Post-MVP / Kernel 1.0**: idempotency for mediated artifact writes and
-promised events, which cannot exist before their underlying capabilities
-(ILK-006, ILK-009) do.
+**Kernel 1.0**: idempotency for mediated artifact writes and promised
+events, which cannot exist before their underlying capabilities (ILK-006,
+ILK-009) do.
 
 Invariants:
 
@@ -1162,7 +1278,7 @@ Acceptance criteria:
 - Retrying after a lost response creates only one accepted request,
   mediated artifact write, administrative effect, audit change, and
   promised event. **MVP** for the accepted request and audit change;
-  **Post-MVP** for the artifact write and promised event (ILK-006/009 do
+  **Kernel 1.0** for the artifact write and promised event (ILK-006/009 do
   not exist yet).
 - A key collision with a different payload returns a deterministic
   conflict. **MVP** — proven (`request_id_cannot_be_rebound_to_another_action_or_fingerprint`,
@@ -1170,9 +1286,9 @@ Acceptance criteria:
 
 ### ILK-013: Mediation
 
-**Scope: MVP** — structural invariant, true by construction across every
-kernel module (every repository trait uses fixed statements and typed
-parameters; nothing accepts caller-supplied SQL). No further work is
+**Scope: MVP Kernel** — structural invariant, true by construction across
+every kernel module (every repository trait uses fixed statements and
+typed parameters; nothing accepts caller-supplied SQL). No further work is
 required for `v0.1.0`; it is included here because it is a permanent
 kernel property the vertical slice depends on, not because there is a
 remaining task.
@@ -1207,100 +1323,88 @@ Acceptance criteria:
 - Bypassing one contract cannot bypass the cross-cutting kernel
   invariants.
 
-## 4. MVP end-to-end acceptance test
+## 6. MVP failure/recovery acceptance tests
 
-Each requirement MUST have automated tests at the lowest practical layer:
-unit tests for policy and state-transition rules, database integration
-tests for immutability/uniqueness/concurrency/rollback, contract tests for
-authentication/authorization/validation/idempotency, and end-to-end tests
-for the full vertical slice. Steps 1–13 below are each individually proven
-today, including step 9; step 14 (failure/recovery) is Section 5. What is
-*not* yet proven is all thirteen steps chained together in one continuous
-run against a live PostgreSQL backend — each is proven in isolation, not
-yet as a single scenario.
-
-| Step | Mechanism | Proof today |
-| --- | --- | --- |
-| 1. Authenticated service submits a signed Request | `POST /v1/requests`, `ServiceRequestVerifier` | `tests/service_request_signature_contract.rs` |
-| 2. Kernel authenticates the service | Fixed HTTP Message Signature profile, ILK-001 | `tests/identity_contract.rs`, `tests/service_request_signature_contract.rs` |
-| 3. Communication admission/replay protection | Default-deny admission + atomic nonce/request-ID replay | `tests/admission_contract.rs`, `tests/replay_protection_contract.rs`, `tests/service_request_gate_contract.rs` |
-| 4. Kernel builds trusted authority facts, calls the external evaluator | `PolicyFacts::for_request_acceptance` → `HttpPolicyEvaluator` → Inquisitor | `tests/authority_contract.rs`, `infernal-inquisitor-simple`'s own test suite |
-| 5. Kernel records/enforces the authority decision | `AuthorityService::authorize` + `AuthorityDecisionRecorder` | `every_authorize_call_durably_records_exactly_one_decision`, `authorize_fails_rather_than_return_an_unrecorded_decision` |
-| 6. Accepted Request is durably persisted in PostgreSQL | `PostgresRequestRepository` | `tests/postgres_request_repository.rs` (ignored, live-DB) |
-| 7. A basic active inclusive subscription matches the Request | `SubscriptionRepository::find_active_by_event_type` | `tests/subscription_contract.rs::find_active_by_event_type_matches_across_services_and_excludes_disabled` |
-| 8. Kernel materializes a durable route | `SubscriptionRouter` → `RouteService::materialize` | `tests/route_materialization_contract.rs`, `tests/postgres_route_repository.rs` (ignored, live-DB) |
-| 9. External scheduler queries eligible work | `GET /v1/routes/eligible` → `EligibleRouteQuery` | `tests/route_materialization_contract.rs`, `tests/work_claim_contract.rs`, colocated `eligible_route_routes` tests in `src/http.rs`, `tests/postgres_route_repository.rs` and `tests/postgres_work_claim_repository.rs` (ignored, live-DB) |
-| 10. Scheduler proposes a worker/route claim | `POST /v1/routes/{route_id}/claims` | `tests/work_claim_contract.rs`, colocated `work_claim_routes` HTTP tests in `src/http.rs` |
-| 11. Kernel atomically arbitrates the claim (lease/fencing) | `WorkClaimService::claim` | `tests/work_claim_contract.rs`, `tests/postgres_work_claim_repository.rs` (ignored, live-DB) |
-| 12. Worker completes the work through the kernel | `POST /v1/claims/{id}/complete` | `tests/work_claim_contract.rs::completion_is_terminal_and_cannot_be_renewed_or_released_afterward` |
-| 13. Resulting state and audit evidence are durable | `protect_work_claim()` trigger + append-only tables | `tests/postgres_work_claim_repository.rs`'s `assert_database_guards` |
-| 14. Restart/retry/failure cannot silently duplicate, lose, or incorrectly complete work | see Section 5 | see Section 5 |
-
-## 5. MVP failure/recovery tests
+The MVP MUST prove:
 
 | Required proof | Test(s) | Status |
 | --- | --- | --- |
 | Retrying the same semantic Request does not create duplicate work | `acceptance_is_durable_through_the_repository_contract_and_safe_to_retry`, `concurrent_acceptance_has_one_fresh_result_and_no_duplicate_record`, `same_request_with_a_new_signature_is_a_safe_idempotency_retry` | Done |
-| Reusing a Request ID for different content is rejected | `request_id_cannot_be_rebound_to_another_action_or_fingerprint`, `request_id_cannot_be_rebound_to_different_semantic_content` | Done |
+| Reusing a Request ID for different content fails deterministically | `request_id_cannot_be_rebound_to_another_action_or_fingerprint`, `request_id_cannot_be_rebound_to_different_semantic_content` | Done |
 | An unauthorized Request fails closed | `default_deny_when_no_grant_matches` | Done |
-| An unavailable or malformed policy evaluator fails closed | `unreachable_evaluator_is_denied_never_implicitly_allowed` | Done |
-| Two workers racing for the same route produce one valid owner | `concurrent_claim_attempts_on_the_same_route_produce_exactly_one_active_holder` | Done |
-| After a claim expires, another worker can acquire the work | `another_worker_can_claim_after_the_prior_lease_expires` | Done |
-| A stale worker cannot complete work after fencing/reassignment | `a_stale_holder_cannot_renew_release_or_complete_after_losing_its_claim` | Done |
-| Restarting the kernel does not lose accepted Requests, routes, claims, authority decisions, or required audit state | `tests/postgres_request_repository.rs`, `tests/postgres_route_repository.rs`, `tests/postgres_work_claim_repository.rs`, `tests/postgres_authority_repository.rs` (all ignored, live-DB) | Proven per-capability; **not yet proven as one continuous restart test spanning the whole vertical slice** — punch-list item, Section 6 |
+| An unavailable, malformed, or erroring policy evaluator fails closed | `unreachable_evaluator_is_denied_never_implicitly_allowed` | Done |
+| Concurrent claims produce exactly one valid owner | `concurrent_claim_attempts_on_the_same_route_produce_exactly_one_active_holder` | Done |
+| An expired claim can be acquired by another worker | `another_worker_can_claim_after_the_prior_lease_expires` | Done |
+| A stale worker cannot complete after fencing/reassignment | `a_stale_holder_cannot_renew_release_or_complete_after_losing_its_claim` | Done |
+| Kernel restart does not lose accepted Requests, routes, claims, authority decisions, or required audit state | `tests/postgres_request_repository.rs`, `tests/postgres_route_repository.rs`, `tests/postgres_work_claim_repository.rs`, `tests/postgres_authority_repository.rs` (all ignored, live-DB) | Proven per-capability; **not yet proven as one continuous restart test spanning the whole vertical slice** — see Section 7 |
 
-## 6. Current implementation status
+Do not require unrelated generalized features before tagging the MVP: none
+of these proofs depend on exclusive delivery, `all_of` selectors, artifact
+content mediation, or events.
 
-Everything tagged **MVP — Complete** in Section 3 requires no further work
-for `v0.1.0`: ILK-001 (Identity), ILK-002's request-acceptance authority,
-ILK-003's immutable requests and inclusive route materialization, ILK-004,
-ILK-007's authority-decision evidence, ILK-008's per-capability audit,
-ILK-010's inclusive subscriptions, and ILK-011's claim/renew/release/
-complete with fencing *and* the eligible-route query
+## 7. Current MVP implementation status
+
+Everything tagged **MVP Kernel — Complete** in Section 5 requires no
+further work for `v0.1.0`: ILK-001 (Identity), ILK-002's request-acceptance
+authority, ILK-003's immutable requests and inclusive route materialization,
+ILK-004, ILK-007's authority-decision evidence, ILK-008's per-capability
+audit, ILK-010's inclusive subscriptions, and ILK-011's claim/renew/
+release/complete with fencing *and* the eligible-route query
 (`GET /v1/routes/eligible`).
 
 What remains before tagging `v0.1.0`:
 
-1. **Wire a simple external Taskmaster against the eligible-route query** —
-   `infernal-taskmaster-simple` is currently an eight-line stub; it needs
+1. **Expose the request content a claimed route refers to.** This is the
+   one missing piece of "receive" in receive → execute → complete
+   ([Section 4](#4-mvp-vertical-slice), step 13): `GET /v1/requests/{id}`
+   is scoped to the request's source service only, and neither
+   `RouteResponse` nor `WorkClaimResponse` carries the request's action,
+   scope, or schema. Without this, a worker that successfully claims a
+   route still has nothing to execute.
+2. **Wire a simple external Taskmaster against the eligible-route query**
+   — `infernal-taskmaster-simple` is currently an eight-line stub; it needs
    enough logic to call `GET /v1/routes/eligible` and propose a claim.
-   Nothing on the kernel side blocks this: the query, and the
-   claim/complete routes it would call next, are already MVP-complete.
-2. **Wire a simple worker through claim → execution → completion** — using
+3. **Wire a simple worker through claim → execution → completion** — using
    the existing `POST /v1/routes/{route_id}/claims` and
-   `POST /v1/claims/{id}/complete` routes, which are already MVP-complete.
-3. **Close any missing audit/idempotency transaction requirements required
-   by that path** — expected to be zero new invariants, since the
-   individual pieces (acceptance, materialization, eligible-route query,
-   claim, completion) are each already transactional or a plain read of
-   already-committed state; this step is about confirming that,
-   end-to-end.
-4. **Run the failure/recovery acceptance tests** (Section 5) as one
-   continuous scenario, including the restart proof that today only
+   `POST /v1/claims/{id}/complete` routes (already MVP-complete) plus
+   whatever closes gap 1 above.
+4. **Close any remaining transaction/idempotency gaps exposed by that
+   end-to-end path** — the individual pieces (acceptance, materialization,
+   eligible-route query, claim, completion) are each already transactional
+   or a plain read of already-committed state; this step is about
+   confirming that, end-to-end, once gap 1 is closed.
+5. **Run the required retry, denial, crash/recovery, concurrency, and
+   fencing tests** ([Section 6](#6-mvp-failurerecovery-acceptance-tests))
+   as one continuous scenario, including the restart proof that today only
    exists per-capability.
+
+See the [completion checklist](#remaining-work-before-v010-minimum-viable-kernel)
+at the end of this document for the same list in one place.
 
 Nothing else is required to tag `v0.1.0`. In particular: exclusive
 consumer groups, `all_of` selectors, backlog matching, route transition
 history, correlation/causation, artifact content mediation, typed events,
 and any scheduling policy are all explicitly out of scope for `v0.1.0` —
-see Section 7.
+see Section 8.
 
-## 7. Future Kernel / Kernel 1.0
+## 8. Future Kernel / Kernel 1.0
 
 These remain legitimate, permanent kernel responsibilities — they protect
-authority, correctness, durability, or replay semantics — but none of them
-block `v0.1.0`. Items already covered inline under their `ILK-*` section in
-Section 3 are cross-referenced rather than repeated; capabilities that are
+authority, communication, or correctness — but none of them block
+`v0.1.0`. Items already covered inline under their `ILK-*` section in
+Section 5 are cross-referenced rather than repeated; capabilities that are
 deferred in their entirety are given in full here.
 
-Cross-referenced (see Section 3 for full invariants/acceptance criteria):
+Cross-referenced (see Section 5 for full invariants/acceptance criteria):
 
 - **ILK-002** — destination-scoped route re-authorization (the
   `PolicyFacts::for_route` domain primitive already exists; only its live
   wiring is deferred); administrator-facing schema-activation workflow.
 - **ILK-003** — exclusive-group routes and consumer-group semantics;
   append-only route transition history; backlog matching (a subscription
-  created after a request does not yet retroactively see it).
+  created after a request does not yet retroactively see it). (A
+  destination-scoped read of request content is an **MVP** gap, not
+  Kernel 1.0 — see Section 7.)
 - **ILK-007** — a generalized `Decision` record type spanning routing,
   pause, and assignment decisions uniformly, rather than relying on each
   capability's own append-only table.
@@ -1325,6 +1429,22 @@ Cross-referenced (see Section 3 for full invariants/acceptance criteria):
   boundary rule, load-balancing/discovery across replicas is
   infrastructure, but identity, fencing, and proof-of-possession
   correctness across replicas remain kernel responsibilities.
+
+### Specific edge classifications
+
+A quick-reference index into the detail above and in
+[Section 11](#11-namespace-data-and-search-ownership):
+
+| Topic | Classification | Why |
+| --- | --- | --- |
+| Exclusive consumer groups | Future Kernel | Exactly-one route/ownership semantics are a correctness guarantee and belong in the kernel, but inclusive delivery is sufficient for the first MVP — see ILK-010. |
+| `all_of` state selectors | Future Kernel | A deliberately small, deterministic, declarative eligibility mechanism over trusted committed state. It MUST NOT become a general business-rules engine — business rules belong to a domain service such as a Parametric Rules Service. |
+| Subscription cursors | Kernel responsibility where needed for durable no-loss/no-duplicate routing; sophisticated cursor/replay semantics are Future Kernel. | ILK-010's simple active-set match is enough for MVP; a durable wakeup cursor is not. |
+| Relationships | Split. | Universal communication relationships (correlation, causation, retry, response, routing, delivery, work origin) may be kernel-owned (ILK-005, Future Kernel); domain-specific relationships belong to the domain service. |
+| Artifact storage | Domain-owned by default. | The kernel owns governance metadata, integrity evidence, authorization, routing, and mediation of cross-service access — never a universal artifact/blob database. See Section 11. |
+| Search | Domain-owned for domain data; kernel-owned only for kernel state. | Kernel search is limited to Requests, routes, subscriptions, authority decisions, claims, and audit records. See Section 11. |
+| Schema lifecycle | Split. | Security-relevant activation/status/grants remain kernel-owned (ILK-002); UI, proposal workflow, or administrative automation may be external. |
+| Multi-replica operation | Split. | Infrastructure mechanics (load balancing, Kubernetes placement) should remain external wherever possible; identity, proof-of-possession, fencing, uniqueness, authority, and durable correctness remain kernel responsibilities. |
 
 Deferred in full (not required by, and not described piecemeal in, the
 MVP vertical slice):
@@ -1355,7 +1475,7 @@ Acceptance criteria:
 
 Implementation status: not started. Business/domain relationships (as
 opposed to the universal ones above) are
-[domain-owned](#9-explicitly-domain-owned-responsibilities), never kernel.
+[domain-owned](#10-domain-owned-services), never kernel.
 
 ### ILK-006: Artifacts
 
@@ -1390,10 +1510,10 @@ Implementation status: not started (schema *registration*, the part this
 capability shares with ILK-002, is already Complete there — see ILK-002).
 Pending: immutable artifact descriptors and fixed artifact
 storage/retrieval mediation. The kernel owns this governed
-mediation/integrity/provenance contract; physical byte storage MAY be
-implemented by an external storage adapter/service rather than becoming a
-kernel-hosted object store — see
-[Section 8](#8-external-service-responsibilities).
+mediation/integrity/provenance contract; the artifact content itself is
+domain-owned by default and physical byte storage MAY be implemented by an
+external storage adapter/service rather than becoming a kernel-hosted
+object store — see [Section 11](#11-namespace-data-and-search-ownership).
 
 ### ILK-009: Events
 
@@ -1420,52 +1540,113 @@ Acceptance criteria:
 
 Implementation status: not started.
 
-## 8. External service responsibilities
+## 9. External infrastructure services
 
-**Taskmaster (external scheduler).** Owns ordering, priority, worker/node
-selection, CPU/GPU/resource-class placement, capacity, affinity,
-backpressure, retry timing, Kubernetes placement, and infrastructure
-health/capacity interpretation. See
-[ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md).
+### Taskmaster (external scheduler)
+
+Taskmaster is an ordinary external service. It owns optimization policy:
+
+- priority;
+- ordering;
+- worker selection;
+- node selection;
+- CPU/GPU/resource-class placement;
+- capacity;
+- affinity;
+- backpressure;
+- retry timing;
+- Kubernetes placement;
+- health/capacity interpretation.
+
+Taskmaster MUST NOT own:
+
+- authoritative route state;
+- eligibility truth;
+- work claims;
+- fencing;
+- durable cursor state;
+- authorization;
+- final ownership decisions.
+
+The kernel exposes trusted eligible work. Taskmaster proposes what should
+run. The kernel atomically decides whether that proposal is still valid.
+
+> **Taskmaster optimizes. Kernel arbitrates.**
+
 The kernel exposes only the trusted state and atomic operations necessary
 for Taskmaster to make proposals — the eligible-route query
 (`GET /v1/routes/eligible`, MVP-complete) and the claim/renew/release/
 complete contract (also MVP-complete) — and remains the final arbiter of
-eligibility and ownership. `infernal-taskmaster-simple` is the reference
-implementation and is currently an unimplemented stub; wiring a minimal
-version of it against the eligible-route query is on the `v0.1.0` punch
-list (Section 6), but the scheduling *logic* itself is never kernel scope.
+eligibility and ownership. See
+[ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md).
+`infernal-taskmaster-simple` is the reference implementation and is
+currently an unimplemented stub; wiring a minimal version of it against
+the eligible-route query is on the `v0.1.0` punch list (Section 7), but
+the scheduling *logic* itself is never kernel scope.
 
-**Inquisitor (external policy evaluator).** Owns the allow/deny policy
-algorithm only. It MUST remain stateless with respect to authoritative
-authorization data; the kernel continues to own identities, grants, schema
-references/status required for authority, trusted fact construction,
-decision recording, and final enforcement. Evaluator unavailable/error/
-malformed response MUST remain fail-closed. See
+### Inquisitor (external policy evaluator)
+
+Inquisitor is an ordinary stateless service. It owns only the policy
+algorithm:
+
+```text
+evaluate(kernel_fact_bundle)
+    → allow / deny
+    → evaluated policy bundle/version
+```
+
+It MUST NOT own authoritative:
+
+- identities;
+- grants;
+- schema state;
+- artifact data;
+- route state;
+- authorization history.
+
+The kernel owns those facts, sends the evaluator the trusted fact bundle,
+records the returned verdict and policy version, and remains the final
+enforcement point. Evaluator failure MUST remain denial.
+
+> **Inquisitor evaluates. Kernel knows, records, and enforces.**
+
+See
 [ADR-0013](decisions/0013-external-stateless-policy-evaluator-for-authority.md).
 `infernal-inquisitor-simple` is the reference implementation and is
 already Complete and integrated — no `v0.1.0` work remains here.
 
-**External artifact/blob storage.** Physical artifact/blob storage MAY be
-implemented by an external storage adapter/service. The kernel should own
-the governed contract, provenance, and integrity requirements, and the
-mediation boundary, rather than becoming a general-purpose object store
-itself (ILK-006, Kernel 1.0 — not required for `v0.1.0`).
+### External artifact/blob storage
 
-## 9. Explicitly domain-owned responsibilities
+Physical artifact/blob storage MAY be implemented by an external storage
+adapter/service. The kernel should own the governed contract, provenance,
+and integrity requirements, and the mediation boundary, rather than
+becoming a general-purpose object store itself (ILK-006, Kernel 1.0 — not
+required for `v0.1.0`). See
+[Section 11](#11-namespace-data-and-search-ownership) for the full
+ownership split.
 
-Business semantics MUST remain outside the kernel. This includes, without
-limitation:
+## 10. Domain-owned services
 
-- engineering/CAD semantics;
-- requirements semantics;
-- document semantics;
-- business workflow rules;
-- domain-specific artifact relationships;
-- domain-specific derived state;
-- domain-specific decisions;
-- AI reasoning; and
-- business interpretation of artifacts.
+Business semantics MUST remain outside the kernel. A domain service is
+authoritative for its own data and semantics, including:
+
+- geometry semantics;
+- CAD topology and parametrics;
+- engineering requirements;
+- documents;
+- simulation;
+- parametric rules;
+- AI reasoning;
+- business workflows;
+- domain artifacts;
+- domain relationships;
+- domain databases;
+- vector stores;
+- graph stores;
+- full-text indexes;
+- spatial indexes;
+- domain search;
+- domain mutation validation.
 
 The kernel MAY validate approved schemas and bounded metadata but MUST NOT
 grow a universal business-object model. This is the same rule stated in
@@ -1474,11 +1655,207 @@ non-administrative object the kernel defines is a **Request**. Connected
 services own the schemas, action vocabulary, artifacts, and
 permission-policy vocabulary for their business domains.
 
-## 10. Open design decisions
+A useful conceptual split for artifacts specifically:
 
-No contradiction with an accepted ADR was found while producing this
-scope reclassification; every reclassification here is a scope label, not
-a technical change. ADR-0009, ADR-0011, and ADR-0013 in particular already
+> **The service owns the artifact.**
+>
+> **The kernel owns the governed evidence that the artifact was
+> referenced, transmitted, authorized, or acted upon.**
+
+[Section 11](#11-namespace-data-and-search-ownership) works through this
+model in detail — how namespaces map to owning services, how
+cross-service communication stays kernel-mediated even between two domain
+services, and how search and business-workflow ownership follow the same
+rule.
+
+## 11. Namespace, data, and search ownership
+
+This section is new architectural guidance, not implementation status: it
+records the ownership model the kernel's namespace/schema mechanism is
+designed to support, so that adding domain services later (geometry,
+requirements, simulation, and so on) does not quietly pull business logic
+into the kernel.
+
+### Service-owned data model
+
+A domain service owns the authoritative artifacts in its namespace. For
+example:
+
+```text
+engineering.*
+    → Engineering Service
+        → engineering database / object storage / indexes
+
+geometry.*
+    → Geometry Service
+        → geometry database / spatial indexes / search
+
+requirements.*
+    → Requirements Service
+        → requirements database / graph / vector index / search
+```
+
+The kernel MUST NOT assume that a namespace maps directly to a physical
+database. The mapping is:
+
+> **namespace → owning service**
+
+The owning service decides how its data is stored, partitioned,
+replicated, indexed, or searched. A service may own relational storage,
+object/blob storage, full-text indexes, vector indexes, graph indexes,
+spatial indexes, and domain-specific search logic. None of these are
+kernel responsibilities.
+
+### Cross-service communication invariant
+
+Domain ownership does NOT permit direct service-to-service communication.
+All communication between services MUST remain kernel-mediated. A service
+MUST NOT directly call another domain service or directly access another
+service's database/index.
+
+For example, a query:
+
+```text
+Parametric Rules Service
+        |
+        | geometry.search Request
+        v
+      Kernel
+        |
+        v
+Geometry Service
+        |
+        | query its own DB/index
+        v
+      Kernel
+        |
+        | search result
+        v
+Parametric Rules Service
+```
+
+And a mutation, if the rules engine decides a geometry change is needed:
+
+```text
+Parametric Rules Service
+        |
+        | geometry.change Request
+        v
+      Kernel
+        |
+        v
+Geometry Service
+        |
+        | validates domain state
+        | performs mutation
+        | creates new version
+        v
+      Kernel
+        |
+        v
+Parametric Rules Service
+```
+
+The kernel does not understand the geometry query, parameter rule, or
+geometry mutation. It authenticates, authorizes, routes, records, and
+mediates the request.
+
+### Artifact ownership
+
+Domain services own authoritative artifact content. The kernel may record
+bounded artifact metadata needed for governance, such as:
+
+- artifact namespace;
+- artifact ID;
+- artifact version;
+- owning service;
+- schema reference/version;
+- content digest;
+- opaque reference;
+- request provenance.
+
+The kernel SHOULD NOT become the general-purpose artifact database (see
+[ILK-006](#ilk-006-artifacts)). Cross-service artifact access MUST occur
+through a kernel-mediated Request. The artifact-owning service MAY return
+content through that governed path, but consumers MUST NOT access the
+owner's storage directly.
+
+### Search ownership
+
+The service that owns authoritative domain data also owns search over
+that data. Examples:
+
+- Geometry Service owns geometry/spatial search.
+- Requirements Service owns full-text/vector/graph search over
+  requirements.
+- Document Service owns document search.
+- Simulation Service owns simulation-result search.
+
+The kernel MAY expose search over kernel-owned state such as Requests,
+routes, subscriptions, authority decisions, claims, and audit records. The
+kernel MUST NOT implement generalized domain search. The kernel only needs
+enough information to authorize and route a search Request, for example:
+
+```text
+action: geometry.search
+source: parametric-rules
+scope: project-123
+schema: geometry.search/v1
+```
+
+The Geometry Service defines what `geometry.search` means.
+
+### Business workflow ownership
+
+The kernel MUST NOT orchestrate business workflows merely because several
+Requests form a sequence. For example, the kernel should not know that:
+
+```text
+search geometry
+→ evaluate parametric rule
+→ propose geometry change
+→ regenerate geometry
+```
+
+forms one business process. Each service receives governed inputs,
+performs its own domain responsibility, and submits subsequent Requests
+when needed. The kernel mediates those Requests independently, exactly as
+it would mediate any other unrelated Request — it does not track that
+they belong to the same business process.
+
+### Namespace scaling rule
+
+Namespaces are ownership boundaries, not physical storage declarations.
+Example:
+
+```text
+engineering.*
+geometry.*
+requirements.*
+simulation.*
+```
+
+Each namespace resolves to an owning service. Larger namespaces can later
+be split into more specific ownership boundaries without teaching the
+kernel the business meaning. For example:
+
+```text
+engineering.geometry.*
+engineering.requirements.*
+engineering.analysis.*
+```
+
+The kernel routes through registered schemas/subscriptions/authority. The
+owning services determine their persistence topology.
+
+> **Namespaces define ownership boundaries. Services define persistence
+> boundaries.**
+
+## 12. Open design decisions
+
+No contradiction with an accepted ADR was found while producing this scope
+reclassification; every reclassification here is a scope label, not a
+technical change. ADR-0009, ADR-0011, and ADR-0013 in particular already
 anticipated this MVP/Kernel-1.0 split (explicit delivery modes, scheduling
 policy moved outside the kernel, and a stateless external evaluator,
 respectively) and remain fully consistent with it.
@@ -1487,14 +1864,18 @@ The requirements intentionally do not choose most of these implementation
 details. One is resolved: the eligible-route query's minimum shape
 (ADR-0011) is now `GET /v1/routes/eligible`, scoped to the caller's own
 verified destination identity, with no pagination and no separate
-worker-class declaration (a route's own destination *is* the worker
-class for `v0.1.0`'s inclusive-only slice) — deliberately the smallest
-contract that unblocks Taskmaster, not a general one. Generalizing it
-(pagination, an explicit worker-class/capability declaration distinct
-from destination identity, and freshness/staleness semantics beyond a
-plain committed read) is Kernel 1.0, tracked alongside exclusive consumer
-groups in Section 7. The remaining open decisions:
+worker-class declaration (a route's own destination *is* the worker class
+for `v0.1.0`'s inclusive-only slice) — deliberately the smallest contract
+that unblocks Taskmaster, not a general one. Generalizing it (pagination,
+an explicit worker-class/capability declaration distinct from destination
+identity, and freshness/staleness semantics beyond a plain committed read)
+is Kernel 1.0, tracked alongside exclusive consumer groups in Section 8.
+The remaining open decisions:
 
+- how a claimed route's worker learns the request's content — a
+  destination-scoped request read, fields embedded directly in the
+  claim/route response, or something else (this is an **MVP** decision,
+  not deferred — see Section 7);
 - service-owned artifact-schema and permission-policy-schema formats;
 - constrained policy evaluation language and scope matching rules;
 - schema publication, administrator approval, and revocation workflow;
@@ -1509,3 +1890,24 @@ groups in Section 7. The remaining open decisions:
 
 Each consequential choice should be recorded as an ADR and linked back to
 the affected `ILK-*` requirements.
+
+### Remaining work before `v0.1.0 — Minimum Viable Kernel`
+
+- Expose the request content (action/scope/schema) a claimed route refers
+  to, so a worker actually has something to execute — the one missing
+  piece of the receive → execute → complete path.
+- Wire `infernal-taskmaster-simple` to query eligible routes and propose
+  claims.
+- Wire one simple worker through receive → execute → complete.
+- Confirm required request/route/claim/completion/audit state is durably
+  recorded across that end-to-end path (already true per-capability; this
+  is an end-to-end confirmation, not new invariants).
+- Close any transaction/idempotency gaps exposed by that end-to-end path.
+- Pass the required retry, denial, crash/recovery, concurrency, and
+  fencing tests ([Section 6](#6-mvp-failurerecovery-acceptance-tests)) as
+  one continuous scenario.
+
+Nothing else belongs on this list. Exclusive delivery, `all_of` selectors,
+backlog matching, route transition history, correlation/causation,
+artifact content mediation, typed events, generalized search, and any
+scheduling policy are real future work, but none of it gates `v0.1.0`.
