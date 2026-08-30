@@ -1254,10 +1254,15 @@ Implementation status:
 - External infrastructure: any scheduling policy (which eligible route a
   worker should claim next, priority, capacity) — deliberately out of
   kernel scope (ADR-0011). `infernal-taskmaster-simple`'s FIFO scheduler
-  now calls the eligible-route query and proposes claims against it (its
-  own signing/parsing/FIFO logic is tested there, independent of a live
-  kernel); a reference worker to actually receive and complete the
-  claimed work is the one piece still unwired — see
+  calls the eligible-route query and proposes claims against it, and
+  `infernal-worker-simple` now claims its own eligible work directly,
+  reads the request behind it, and completes it — a route can only ever
+  be claimed and completed by the same authenticated caller (`claim`
+  takes `worker_service`/`worker_instance` from the caller's own verified
+  identity, never a body field), so a worker performs this whole loop
+  itself rather than executing a claim a separate scheduler process
+  proposed. Both reference services' own signing/parsing/policy logic is
+  tested independent of a live kernel — see
   [Section 7](#7-current-mvp-implementation-status).
 
 ### ILK-012: Idempotency
@@ -1365,15 +1370,19 @@ audit, ILK-010's inclusive subscriptions, and ILK-011's claim/renew/
 release/complete with fencing *and* the eligible-route query
 (`GET /v1/routes/eligible`).
 
-What remains before tagging `v0.1.0`:
+Every kernel capability the vertical slice needs is now code-complete.
+`infernal-taskmaster-simple`'s FIFO scheduler calls the eligible-route
+query and proposes claims; `infernal-worker-simple` claims its own
+eligible work, reads the request behind it, and completes it — both
+reference services' signing, parsing, and policy logic are proven
+independent of a live kernel connection, in their own repositories. What
+remains before tagging `v0.1.0` is validation, not new capability:
 
-1. **Wire a simple worker through claim → execution → completion** — using
-   the existing `POST /v1/routes/{route_id}/claims`,
-   `GET /v1/routes/{route_id}/request`, and `POST /v1/claims/{id}/complete`
-   routes, all already MVP-complete. `infernal-taskmaster-simple`'s FIFO
-   scheduler already calls the eligible-route query and proposes claims
-   against it; nothing exists yet on the other end of a claimed route to
-   actually receive and complete the work.
+1. **Run the whole path — submit, materialize, claim, read, complete —
+   against a real, enrolled deployment** (real ADR-0008 Kubernetes
+   TokenReview enrollment and a reachable HTTPS kernel are deployment
+   infrastructure, not something any of the unit/contract test suites in
+   this repo or the two reference-service repos can provide).
 2. **Close any remaining transaction/idempotency gaps exposed by that
    end-to-end path** — the individual pieces (acceptance, materialization,
    eligible-route query, claim, routed-request read, completion) are each
@@ -1589,9 +1598,17 @@ scheduler signs and sends `GET /v1/routes/eligible` and
 instance credential, the mirror image of how the kernel signs its own
 call to a policy evaluator, and treats a lost claim race (`409`) as an
 ordinary outcome, not an error — proven with its own signing/parsing/FIFO
-tests, independent of a live kernel connection. What remains is wiring a
-reference worker on the other end of a claimed route (Section 7); the
-scheduling *logic* itself is never kernel scope.
+tests, independent of a live kernel connection.
+[`infernal-worker-simple`](https://github.com/BenjaminGrandstaff/infernal-worker-simple)
+is the reference worker on the other end: because the kernel takes
+`worker_service`/`worker_instance` from whichever caller signs the claim
+request, never a body field, there is no way for Taskmaster to claim work
+and hand it to a different process to complete — so this worker claims
+its own eligible work directly rather than executing a proposal
+Taskmaster made on its behalf. Both reference services prove the same
+contract from different vantage points; validating them together against
+a live, enrolled kernel is what remains (Section 7). The scheduling
+*logic* itself is never kernel scope.
 
 ### Inquisitor (external policy evaluator)
 
@@ -1904,11 +1921,17 @@ the affected `ILK-*` requirements.
 
 ### Remaining work before `v0.1.0 — Minimum Viable Kernel`
 
-- Wire one simple worker through receive → execute → complete, using the
-  now-complete `GET /v1/routes/{route_id}/request` to receive.
-  `infernal-taskmaster-simple` already queries eligible routes and
-  proposes claims; nothing yet exists on the worker side of a claimed
-  route.
+Every kernel capability and reference service the vertical slice needs is
+code-complete: `infernal-taskmaster-simple` queries eligible routes and
+proposes claims, and `infernal-worker-simple` claims its own eligible
+work, reads the request behind it, and completes it. What is left is
+validation, not new capability:
+
+- Run the whole path — submit, materialize, claim, read, complete —
+  against a real, enrolled deployment (this needs real ADR-0008
+  Kubernetes TokenReview enrollment and a reachable HTTPS kernel; no
+  unit/contract test suite, in this repo or either reference-service
+  repo, can provide that).
 - Confirm required request/route/claim/completion/audit state is durably
   recorded across that end-to-end path (already true per-capability; this
   is an end-to-end confirmation, not new invariants).
