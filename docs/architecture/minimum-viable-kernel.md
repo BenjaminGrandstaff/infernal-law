@@ -1401,18 +1401,38 @@ start, configure correctly, and log a clear transport error rather than
 crashing when their signed calls can't complete — because
 `infernal-client-rs`'s `SignedRequest` always dials
 `https://<authority>`, while `infernal-law`'s own Kubernetes `Service`
-does not terminate TLS. A TLS-terminating layer in front of the kernel is
+did not terminate TLS. A TLS-terminating layer in front of the kernel was
 a real, confirmed requirement for those two services to actually complete
 a call, not merely attempt one — deployment infrastructure, not a kernel
 code gap.
 
+That gap has since been closed: an nginx sidecar now terminates TLS in
+the kernel's own Pod, exposed as the Kubernetes `Service`'s `https` port
+(see the [Kubernetes section of the README](../../README.md#kubernetes)).
+Getting a real signed call through it end to end surfaced two further
+deployment-only bugs, both fixed and reverified against the same kind
+cluster: the proxy's default upstream HTTP version (1.0) was rejected by
+the kernel's minimal parser, which requires exactly `HTTP/1.1`; and a
+self-signed certificate generated without explicit `CA:FALSE` and
+`subjectAltName` extensions defaults to looking like its own CA with no
+usable hostname, which `rustls` (`infernal-client-rs`'s TLS backend)
+rejects outright as `CaUsedAsEndEntity`. With both fixed,
+`infernal-taskmaster-simple` and `infernal-worker-simple` now complete
+real signed HTTPS calls to the kernel through the sidecar and receive its
+correct, well-formed `401` for an identity that is not yet enrolled —
+proving the entire transport/HTTP/signature-verification pipeline works,
+with only the enrollment step itself (below) remaining as genuine
+infrastructure, not code.
+
 What remains before tagging `v0.1.0` is finishing that validation, not new
 capability:
 
-1. **Add a TLS-terminating layer in front of the kernel and complete real
-   ADR-0008 Kubernetes TokenReview enrollment** for the reference
-   services' identities, then run the whole path — submit, materialize,
-   claim, read, complete — as one real signed round trip end to end.
+1. **Complete real ADR-0008 Kubernetes TokenReview enrollment** for the
+   reference services' identities — the TLS layer is done and verified;
+   this is the last piece standing between the confirmed-working transport
+   and one real signed round trip — then run the whole path — submit,
+   materialize, claim, read, complete — as one real signed round trip end
+   to end.
 2. **Close any remaining transaction/idempotency gaps exposed by that
    end-to-end path** — the individual pieces (acceptance, materialization,
    eligible-route query, claim, routed-request read, completion) are each
@@ -1962,13 +1982,17 @@ deploy into a real Kubernetes cluster, and start correctly; the full
 live-Postgres test suite has actually been run against real PostgreSQL
 and passes. What is left is finishing that validation, not new capability:
 
-- Add a TLS-terminating layer in front of the kernel's Kubernetes
-  `Service` (confirmed required: `infernal-client-rs`'s outbound signed
-  calls always dial `https://`, and the kernel's `Service` does not
-  terminate TLS) and complete real ADR-0008 Kubernetes TokenReview
-  enrollment for the reference services' identities, then run the whole
-  path — submit, materialize, claim, read, complete — as one real signed
-  round trip.
+- Complete real ADR-0008 Kubernetes TokenReview enrollment for the
+  reference services' identities, then run the whole path — submit,
+  materialize, claim, read, complete — as one real signed round trip. An
+  nginx sidecar now terminates TLS in front of the kernel's Kubernetes
+  `Service` (`infernal-client-rs`'s outbound signed calls always dial
+  `https://`, and the `Service` did not previously terminate TLS); this
+  has been verified end to end — `infernal-taskmaster-simple` and
+  `infernal-worker-simple` complete real signed HTTPS calls through it
+  and receive the kernel's correct `401` for an identity that isn't yet
+  enrolled — so enrollment is the only piece left before a full round
+  trip.
 - Confirm required request/route/claim/completion/audit state is durably
   recorded across that end-to-end path (already true per-capability,
   proven against live PostgreSQL; this is a confirmation that it holds
