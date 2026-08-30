@@ -428,16 +428,43 @@ pub fn serve(application: Application) -> std::io::Result<()> {
 fn handle_connection(mut stream: TcpStream, application: &Application) -> std::io::Result<()> {
     let response = match read_request(&mut stream) {
         Ok(request) => dispatch(request, application),
-        Err(RequestReadError::PayloadTooLarge) => json_error(
+        Err(RequestReadError::PayloadTooLarge) => json_response(
             "413 Payload Too Large",
-            EnrollmentErrorResponse::malformed_request(),
+            &MalformedRequestResponse::payload_too_large(),
         ),
-        Err(RequestReadError::Malformed) => json_error(
-            "400 Bad Request",
-            EnrollmentErrorResponse::malformed_request(),
-        ),
+        Err(RequestReadError::Malformed) => {
+            json_response("400 Bad Request", &MalformedRequestResponse::malformed())
+        }
     };
     write_response(&mut stream, &response)
+}
+
+/// The raw HTTP request could not even be parsed into a route, so no
+/// endpoint-specific error shape (enrollment, governed route, etc.)
+/// applies yet — this is the one response shape every caller can hit
+/// regardless of what it was trying to reach, for example a
+/// TLS-terminating proxy in front of this process forwarding a request
+/// over an unsupported HTTP version.
+#[derive(serde::Serialize)]
+struct MalformedRequestResponse {
+    code: &'static str,
+    message: &'static str,
+}
+
+impl MalformedRequestResponse {
+    const fn malformed() -> Self {
+        Self {
+            code: "malformed_request",
+            message: "the HTTP request could not be parsed",
+        }
+    }
+
+    const fn payload_too_large() -> Self {
+        Self {
+            code: "payload_too_large",
+            message: "the request body exceeds the maximum accepted size",
+        }
+    }
 }
 
 fn dispatch(request: ParsedRequest, application: &Application) -> Response {
@@ -1830,8 +1857,8 @@ mod tests {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     use super::{
-        KernelIdentityResponse, MAX_ENROLLMENT_BODY_BYTES, RequestReadError, read_request,
-        readiness_response, route,
+        KernelIdentityResponse, MAX_ENROLLMENT_BODY_BYTES, MalformedRequestResponse,
+        RequestReadError, read_request, readiness_response, route,
     };
     use crate::kernel::identity::ActorId;
     use crate::kernel::instance_keys::InstanceCredential;
@@ -1895,6 +1922,18 @@ mod tests {
             read_request(&mut Cursor::new(request)),
             Err(RequestReadError::PayloadTooLarge)
         );
+    }
+
+    #[test]
+    fn a_connection_level_parse_failure_is_not_shaped_like_an_enrollment_error() {
+        let malformed = serde_json::to_string(&MalformedRequestResponse::malformed()).unwrap();
+        let too_large =
+            serde_json::to_string(&MalformedRequestResponse::payload_too_large()).unwrap();
+
+        assert!(!malformed.contains("enrollment"));
+        assert!(!too_large.contains("enrollment"));
+        assert!(malformed.contains("\"code\":\"malformed_request\""));
+        assert!(too_large.contains("\"code\":\"payload_too_large\""));
     }
 
     #[test]
