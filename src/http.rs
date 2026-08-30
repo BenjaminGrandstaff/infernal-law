@@ -24,7 +24,9 @@ use crate::kernel::enrollment::{
 };
 use crate::kernel::identity::ActorId;
 use crate::kernel::instance_keys::{InstanceId, InstancePublicKey};
-use crate::kernel::instance_registry::{InstanceRegistryRepository, RegisteredInstance};
+use crate::kernel::instance_registry::{
+    InstanceRegistryError, InstanceRegistryRepository, InstanceRegistryService, RegisteredInstance,
+};
 use crate::kernel::request_gate::{
     AdmittedServiceRequest, ServiceRequestGate, ServiceRequestGateError,
 };
@@ -46,6 +48,7 @@ use crate::wiring::Application;
 use self::enrollment_dto::{
     EnrollmentErrorResponse, EnrollmentSubmissionRequest, EnrollmentSuccessResponse,
 };
+use self::instance_renewal_dto::InstanceRenewalRequest;
 use self::request_dto::{AcceptedRequestResponse, SubmitRequestRequest};
 use self::route_dto::{EligibleRouteListResponse, RouteResponse};
 use self::schema_dto::{PublishSchemaRequest, SchemaVersionResponse};
@@ -55,6 +58,7 @@ use self::subscription_dto::{
 use self::work_claim_dto::{ClaimRequest, FencedActionRequest, RenewRequest, WorkClaimResponse};
 
 pub mod enrollment_dto;
+pub mod instance_renewal_dto;
 pub mod request_dto;
 pub mod route_dto;
 pub mod schema_dto;
@@ -567,6 +571,13 @@ fn dispatch(request: ParsedRequest, application: &Application) -> Response {
                 return complete_claim_route(&request, claim_id, application.work_claims());
             }
         }
+        if path == "/v1/instances/renew" {
+            return renew_instance_route(
+                &request,
+                verified.instance_id(),
+                application.instance_registry(),
+            );
+        }
         let authority = match policy_evaluator_from_env(application) {
             Ok(authority) => authority,
             Err(response) => return response,
@@ -694,6 +705,27 @@ impl GovernedErrorResponse {
         Self {
             code: "subscription_not_authorized",
             message: "subscription action is not authorized",
+        }
+    }
+
+    const fn invalid_instance_renewal_request() -> Self {
+        Self {
+            code: "invalid_instance_renewal_request",
+            message: "instance renewal request is invalid",
+        }
+    }
+
+    const fn instance_lease_conflict() -> Self {
+        Self {
+            code: "instance_lease_conflict",
+            message: "instance lease revision does not match the current lease",
+        }
+    }
+
+    const fn instance_not_found() -> Self {
+        Self {
+            code: "instance_not_found",
+            message: "instance was not found",
         }
     }
 
@@ -826,6 +858,7 @@ fn is_governed_route(path: &str) -> bool {
         || (path.starts_with("/v1/routes/") && path.ends_with("/claims"))
         || (path.starts_with("/v1/routes/") && path.ends_with("/request"))
         || is_claim_action_path(path)
+        || path == "/v1/instances/renew"
 }
 
 fn is_supported_governed_method(method: &str, path: &str) -> bool {
@@ -839,6 +872,7 @@ fn is_supported_governed_method(method: &str, path: &str) -> bool {
         || (path.starts_with("/v1/routes/") && path.ends_with("/claims") && method == "POST")
         || (path.starts_with("/v1/routes/") && path.ends_with("/request") && method == "GET")
         || (is_claim_action_path(path) && method == "POST")
+        || (path == "/v1/instances/renew" && method == "POST")
 }
 
 fn is_claim_action_path(path: &str) -> bool {
@@ -1508,6 +1542,72 @@ fn parse_fenced_action(
         )
     })?;
     Ok((claim_id, dto))
+}
+
+/// Renews the *calling* instance's own registration lease -- never another
+/// instance's. `instance_id` comes from `VerifiedServiceRequest::instance_id`
+/// (the caller's own already-verified signed identity), never a request-body
+/// or path field, so this route can only ever extend the lease the caller
+/// itself just proved it currently holds. That reuse of the ordinary
+/// governed-request gate is what makes renewal safe without a separate
+/// authentication scheme: an instance whose lease has already expired fails
+/// the gate before this handler ever runs, exactly like any other governed
+/// route, so there is no way to renew a lease after the fact -- only to
+/// extend one that is still valid.
+fn renew_instance_route<R: InstanceRegistryRepository>(
+    request: &ParsedRequest,
+    instance_id: InstanceId,
+    instances: &InstanceRegistryService<R>,
+) -> Response {
+    if !request
+        .content_type
+        .as_deref()
+        .is_some_and(is_json_content_type)
+    {
+        return json_response(
+            "415 Unsupported Media Type",
+            &GovernedErrorResponse::invalid_instance_renewal_request(),
+        );
+    }
+    let dto: InstanceRenewalRequest = match serde_json::from_slice(&request.body) {
+        Ok(dto) => dto,
+        Err(_) => {
+            return json_response(
+                "400 Bad Request",
+                &GovernedErrorResponse::invalid_instance_renewal_request(),
+            );
+        }
+    };
+    match instances.renew(instance_id, dto.expected_revision(), unix_time()) {
+        Ok(instance) => json_response("200 OK", &EnrollmentSuccessResponse::from(&instance)),
+        Err(error) => instance_renewal_error_response(&error),
+    }
+}
+
+fn instance_renewal_error_response(error: &InstanceRegistryError) -> Response {
+    match error {
+        InstanceRegistryError::RevisionConflict(_) => json_response(
+            "409 Conflict",
+            &GovernedErrorResponse::instance_lease_conflict(),
+        ),
+        InstanceRegistryError::NotFound(_)
+        | InstanceRegistryError::Revoked(_)
+        | InstanceRegistryError::Expired(_) => json_response(
+            "404 Not Found",
+            &GovernedErrorResponse::instance_not_found(),
+        ),
+        InstanceRegistryError::InvalidTimestamp
+        | InstanceRegistryError::InvalidLeaseDuration
+        | InstanceRegistryError::InvalidEndpoint
+        | InstanceRegistryError::InvalidStoredRecord
+        | InstanceRegistryError::AlreadyExists(_)
+        | InstanceRegistryError::Key(_)
+        | InstanceRegistryError::Repository(_)
+        | InstanceRegistryError::UnknownService(_) => json_response(
+            "503 Service Unavailable",
+            &GovernedErrorResponse::internal_error(),
+        ),
+    }
 }
 
 fn work_claim_error_response(error: &WorkClaimError) -> Response {
@@ -3757,6 +3857,217 @@ mod tests {
             request.content_type = Some("text/plain".to_owned());
 
             let response = release_claim_route(&request, &claim_id, &claims);
+
+            assert_eq!(response.status, "415 Unsupported Media Type");
+        }
+    }
+
+    mod instance_renewal_routes {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        use super::super::*;
+        use crate::kernel::instance_keys::{InstanceCredential, InstancePublicKey};
+        use crate::kernel::instance_registry::LeasePolicy;
+
+        #[derive(Clone, Default)]
+        struct MemoryInstances {
+            instances: Arc<Mutex<HashMap<InstanceId, RegisteredInstance>>>,
+        }
+
+        impl MemoryInstances {
+            fn with(instance: RegisteredInstance) -> Self {
+                let repository = Self::default();
+                repository
+                    .instances
+                    .lock()
+                    .unwrap()
+                    .insert(instance.public_key().instance_id(), instance);
+                repository
+            }
+        }
+
+        impl InstanceRegistryRepository for MemoryInstances {
+            fn insert(&self, instance: RegisteredInstance) -> Result<(), InstanceRegistryError> {
+                self.instances
+                    .lock()
+                    .unwrap()
+                    .insert(instance.public_key().instance_id(), instance);
+                Ok(())
+            }
+
+            fn find(
+                &self,
+                instance_id: InstanceId,
+            ) -> Result<Option<RegisteredInstance>, InstanceRegistryError> {
+                Ok(self.instances.lock().unwrap().get(&instance_id).cloned())
+            }
+
+            fn renew(
+                &self,
+                instance_id: InstanceId,
+                expected_revision: i64,
+                _renewed_at: i64,
+                lease_expires_at: i64,
+            ) -> Result<RegisteredInstance, InstanceRegistryError> {
+                let mut instances = self.instances.lock().unwrap();
+                let existing = instances
+                    .get(&instance_id)
+                    .ok_or(InstanceRegistryError::NotFound(instance_id))?;
+                if existing.revoked_at().is_some() {
+                    return Err(InstanceRegistryError::Revoked(instance_id));
+                }
+                if existing.lease_revision() != expected_revision {
+                    return Err(InstanceRegistryError::RevisionConflict(instance_id));
+                }
+                let renewed = RegisteredInstance::restore(
+                    existing.public_key().clone(),
+                    existing.endpoint(),
+                    existing.registered_at(),
+                    lease_expires_at,
+                    existing.lease_revision() + 1,
+                    None,
+                )
+                .unwrap();
+                instances.insert(instance_id, renewed.clone());
+                Ok(renewed)
+            }
+
+            fn revoke(
+                &self,
+                instance_id: InstanceId,
+                revoked_at: i64,
+            ) -> Result<RegisteredInstance, InstanceRegistryError> {
+                let mut instances = self.instances.lock().unwrap();
+                let existing = instances
+                    .get(&instance_id)
+                    .ok_or(InstanceRegistryError::NotFound(instance_id))?
+                    .clone();
+                let revoked = RegisteredInstance::restore(
+                    existing.public_key().clone(),
+                    existing.endpoint(),
+                    existing.registered_at(),
+                    existing.lease_expires_at(),
+                    existing.lease_revision(),
+                    Some(revoked_at),
+                )
+                .unwrap();
+                instances.insert(instance_id, revoked.clone());
+                Ok(revoked)
+            }
+        }
+
+        fn registered(now: i64) -> (InstancePublicKey, RegisteredInstance) {
+            let credential = InstanceCredential::generate(ActorId::new());
+            let public_key = credential.public_key().clone();
+            let instance = RegisteredInstance::create(
+                public_key.clone(),
+                "https://example.test",
+                now,
+                now + 60,
+            )
+            .unwrap();
+            (public_key, instance)
+        }
+
+        fn parsed_request(body: &[u8]) -> ParsedRequest {
+            ParsedRequest {
+                method: "POST".to_owned(),
+                path: "/v1/instances/renew".to_owned(),
+                authority: Some("kernel.example.test".to_owned()),
+                content_type: Some("application/json".to_owned()),
+                content_digest: None,
+                service_id: None,
+                instance_id: None,
+                request_id: None,
+                signature_input: None,
+                signature: None,
+                body: body.to_vec(),
+            }
+        }
+
+        #[test]
+        fn renew_extends_the_lease_and_advances_the_revision() {
+            let now = unix_time();
+            let (public_key, instance) = registered(now);
+            let instances = InstanceRegistryService::new(
+                MemoryInstances::with(instance),
+                LeasePolicy::default(),
+            );
+            let request = parsed_request(br#"{"expected_revision":1}"#);
+
+            let response = renew_instance_route(&request, public_key.instance_id(), &instances);
+
+            assert_eq!(response.status, "200 OK");
+            assert!(response.body.contains("\"lease_revision\":2"));
+        }
+
+        #[test]
+        fn renew_rejects_a_stale_expected_revision_without_extending_the_lease() {
+            let now = unix_time();
+            let (public_key, instance) = registered(now);
+            let repository = MemoryInstances::with(instance);
+            let instances =
+                InstanceRegistryService::new(repository.clone(), LeasePolicy::default());
+            let request = parsed_request(br#"{"expected_revision":1}"#);
+            renew_instance_route(&request, public_key.instance_id(), &instances);
+            let stale_request = parsed_request(br#"{"expected_revision":1}"#);
+
+            let response =
+                renew_instance_route(&stale_request, public_key.instance_id(), &instances);
+
+            assert_eq!(response.status, "409 Conflict");
+            assert_eq!(
+                repository
+                    .find(public_key.instance_id())
+                    .unwrap()
+                    .unwrap()
+                    .lease_revision(),
+                2
+            );
+        }
+
+        #[test]
+        fn renew_hides_a_revoked_instance_as_not_found() {
+            let now = unix_time();
+            let (public_key, instance) = registered(now);
+            let repository = MemoryInstances::with(instance);
+            repository.revoke(public_key.instance_id(), now).unwrap();
+            let instances = InstanceRegistryService::new(repository, LeasePolicy::default());
+            let request = parsed_request(br#"{"expected_revision":1}"#);
+
+            let response = renew_instance_route(&request, public_key.instance_id(), &instances);
+
+            assert_eq!(response.status, "404 Not Found");
+        }
+
+        #[test]
+        fn renew_rejects_a_malformed_body() {
+            let now = unix_time();
+            let (public_key, instance) = registered(now);
+            let instances = InstanceRegistryService::new(
+                MemoryInstances::with(instance),
+                LeasePolicy::default(),
+            );
+            let request = parsed_request(b"not json");
+
+            let response = renew_instance_route(&request, public_key.instance_id(), &instances);
+
+            assert_eq!(response.status, "400 Bad Request");
+        }
+
+        #[test]
+        fn renew_rejects_a_non_json_content_type() {
+            let now = unix_time();
+            let (public_key, instance) = registered(now);
+            let instances = InstanceRegistryService::new(
+                MemoryInstances::with(instance),
+                LeasePolicy::default(),
+            );
+            let mut request = parsed_request(br#"{"expected_revision":1}"#);
+            request.content_type = Some("text/plain".to_owned());
+
+            let response = renew_instance_route(&request, public_key.instance_id(), &instances);
 
             assert_eq!(response.status, "415 Unsupported Media Type");
         }

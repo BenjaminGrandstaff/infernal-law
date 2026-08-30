@@ -494,6 +494,10 @@ Implementation status:
   context, and sanitized fail-closed responses.
 - Complete: ILK-002 authority and implemented governed subscription/
   request/route/claim handlers behind the middleware.
+- Complete: `POST /v1/instances/renew`, letting an enrolled instance
+  extend its own lease before it expires via compare-and-set revision
+  matching, reusing the ordinary governed-request gate for authentication
+  (see the gap note below for why this was added).
 - Future Kernel: not started — production-hardened proof-of-possession
   renewal transport (today's signed lease-renewal transport is not yet
   hardened for that); correctness under multiple kernel replicas for
@@ -502,20 +506,29 @@ Implementation status:
   administration; and hardened instance reconciliation/recovery behavior
   (see [Section 8](#8-future-kernel-kernel-10)).
 - **Gap found by live testing (2026-08-30, infernal-librarian-simple's own
-  live vertical-slice run):** the "signed lease-renewal transport" note
-  above is about hardening `kernel::handshakes`, which is the *kernel*
-  challenging a push-delivery subscriber — not a route a *client* instance
-  can call to renew its own lease before `DEFAULT_LEASE_SECONDS` (60s)
-  expires. No such route exists today; `/v1/enrollments` is the only way
-  to get a valid instance/key pair, and its challenge is single-use and
-  only issued out of band by an operator. Concretely: every reference
-  service that polls (`infernal-taskmaster-simple`,
-  `infernal-worker-simple`, `infernal-librarian-simple`) starts failing
-  every signed call with 401 once it has been running for about a minute,
-  and recovering requires a full process restart plus a fresh operator-
-  issued enrollment challenge — there is no client-side fix. This is an
-  ILK-001 gap distinct from the push-handshake item above, not yet
-  reflected as its own Kernel 1.0 line.
+  live vertical-slice run), fixed the same day:** the "signed
+  lease-renewal transport" note above is about hardening
+  `kernel::handshakes`, which is the *kernel* challenging a push-delivery
+  subscriber — not a route a *client* instance can call to renew its own
+  lease before `DEFAULT_LEASE_SECONDS` (60s) expires. No such route
+  existed. Concretely: every reference service that polls
+  (`infernal-taskmaster-simple`, `infernal-worker-simple`,
+  `infernal-librarian-simple`) started failing every signed call with 401
+  once it had been running for about a minute, and recovering required a
+  full process restart plus a fresh operator-issued enrollment challenge.
+  This was a real ILK-001 gap distinct from the push-handshake item above.
+  Fixed by adding `POST /v1/instances/renew` as an ordinary governed
+  route: it extends the *calling* instance's own lease (identity taken
+  from the caller's already-verified signed request, never a body field),
+  via the compare-and-set `InstanceRegistryService::renew` method that
+  already existed in the domain layer but was unreachable over HTTP.
+  Verified live: `infernal-librarian-simple`'s `KernelClient::renew_lease`
+  renews proactively (`RENEWAL_MARGIN_SECONDS` before expiry) and ran for
+  several minutes with zero 401s across five renewals. This only helps a
+  process that performs its own enrollment at startup, which is how every
+  current reference service is deployed; an identity enrolled some other
+  way still has no way to discover its own current lease state to renew
+  from.
 
 See the [direct service protocol](direct-service-protocol.md) and
 [ADR-0003](decisions/0003-direct-signed-service-rest.md).
