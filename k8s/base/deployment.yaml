@@ -20,6 +20,15 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        # Without this, the kubernetes-reviewer volume's ca.crt (mode 0400,
+        # confirmed here to be owned by root regardless of runAsUser/
+        # runAsGroup above) is unreadable by this container's own process,
+        # and KubernetesTokenReviewer::from_env() fails closed with a
+        # generic "enrollment could not be completed" -- undetected until
+        # /v1/enrollments was actually exercised against a real cluster
+        # for the first time. fsGroup makes the kubelet mount every
+        # volume's files as group-owned by this GID instead.
+        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
