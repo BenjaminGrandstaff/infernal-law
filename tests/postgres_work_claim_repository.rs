@@ -1,6 +1,7 @@
 //! Goal: prove ILK-011 work claims are atomic, fenced, and append-only
 //! (status transitions once, terminally) in live PostgreSQL.
 
+use std::collections::HashSet;
 use std::env;
 
 use infernal_law::infrastructure::postgres_authority_repository::PostgresAuthorityRepository;
@@ -99,6 +100,13 @@ fn work_claims_are_atomic_fenced_and_append_only() {
         .claim(route.id(), destination.id(), worker_instance, 100, 10)
         .unwrap();
     assert_eq!(first.fencing_token(), 1);
+    assert_eq!(
+        application
+            .work_claims()
+            .active_route_ids(&[route.id()], 10)
+            .unwrap(),
+        HashSet::from([route.id()])
+    );
 
     assert_eq!(
         application
@@ -142,12 +150,27 @@ fn work_claims_are_atomic_fenced_and_append_only() {
             .renew(completed.id(), completed.fencing_token(), 500, 41),
         Err(WorkClaimError::Fenced)
     );
+    assert!(
+        application
+            .work_claims()
+            .active_route_ids(&[route.id()], 40)
+            .unwrap()
+            .is_empty(),
+        "a completed claim must not make its route look currently claimed"
+    );
 
     let second = application
         .work_claims()
         .claim(route.id(), destination.id(), worker_instance, 600, 50)
         .unwrap();
     assert_eq!(second.fencing_token(), 2);
+    assert_eq!(
+        application
+            .work_claims()
+            .active_route_ids(&[route.id()], 50)
+            .unwrap(),
+        HashSet::from([route.id()])
+    );
 
     assert_database_guards(first.id(), second.id());
 }

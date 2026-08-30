@@ -357,6 +357,14 @@ pub trait RouteRepository: Send + Sync {
     fn materialize(&self, route: Route) -> Result<Route, RequestError>;
 
     fn list_for_request(&self, request_id: RequestId) -> Result<Vec<Route>, RequestError>;
+
+    /// Lists every route currently materialized for `destination_service`,
+    /// in creation order -- the read an eligible-route query (ADR-0011)
+    /// composes with ILK-011's active-claim check to find claimable work.
+    fn list_for_destination(
+        &self,
+        destination_service: ActorId,
+    ) -> Result<Vec<Route>, RequestError>;
 }
 
 #[derive(Clone)]
@@ -392,6 +400,13 @@ where
 
     pub fn list_for_request(&self, request_id: RequestId) -> Result<Vec<Route>, RequestError> {
         self.repository.list_for_request(request_id)
+    }
+
+    pub fn list_for_destination(
+        &self,
+        destination_service: ActorId,
+    ) -> Result<Vec<Route>, RequestError> {
+        self.repository.list_for_destination(destination_service)
     }
 }
 

@@ -63,6 +63,14 @@ It listens on `0.0.0.0:8080` by default and provides:
   for a subscription created afterward are not built yet); a materialization
   failure never fails the submission response, since the request is already
   durably accepted.
+- `GET /v1/routes/eligible` — the eligible-route query an external scheduler
+  (Taskmaster, [ADR-0011](docs/architecture/decisions/0011-move-scheduling-policy-outside-the-kernel.md))
+  reads before proposing a claim: every materialized route currently
+  assigned to the caller's own verified identity that has no live,
+  unexpired active claim. The destination queried is always the caller's
+  own identity, never a request parameter, so this exposes no other
+  service's routes; it requires no separate ILK-002 authority decision,
+  the same as any other read of the caller's own data.
 - `POST /v1/routes/{route_id}/claims` — ILK-011 work-claim creation
   (`{"lease_seconds": <i64>}`). The worker's identity is always the caller's
   own verified service and instance, never a body field. Fails `404` if the

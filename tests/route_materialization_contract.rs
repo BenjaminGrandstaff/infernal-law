@@ -36,6 +36,20 @@ impl RouteRepository for MemoryRoutes {
             .cloned()
             .collect())
     }
+
+    fn list_for_destination(
+        &self,
+        destination_service: ActorId,
+    ) -> Result<Vec<Route>, RequestError> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|route| route.destination_service() == destination_service)
+            .cloned()
+            .collect())
+    }
 }
 
 #[test]
@@ -96,4 +110,34 @@ fn routes_to_different_requests_never_collide() {
 
     assert_eq!(routes.list_for_request(first_request).unwrap().len(), 1);
     assert_eq!(routes.list_for_request(second_request).unwrap().len(), 1);
+}
+
+#[test]
+fn listing_by_destination_returns_only_that_destinations_routes() {
+    let routes = RouteService::new(MemoryRoutes::default());
+    let source = ActorId::new();
+    let destination = ActorId::new();
+    let other_destination = ActorId::new();
+
+    let route = routes
+        .materialize(
+            source,
+            RequestId::new(),
+            SubscriptionId::new(),
+            destination,
+            10,
+        )
+        .unwrap();
+    routes
+        .materialize(
+            source,
+            RequestId::new(),
+            SubscriptionId::new(),
+            other_destination,
+            10,
+        )
+        .unwrap();
+
+    let listed = routes.list_for_destination(destination).unwrap();
+    assert_eq!(listed, vec![route]);
 }

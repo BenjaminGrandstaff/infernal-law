@@ -47,6 +47,7 @@ use self::enrollment_dto::{
     EnrollmentErrorResponse, EnrollmentSubmissionRequest, EnrollmentSuccessResponse,
 };
 use self::request_dto::{AcceptedRequestResponse, SubmitRequestRequest};
+use self::route_dto::{EligibleRouteListResponse, RouteResponse};
 use self::schema_dto::{PublishSchemaRequest, SchemaVersionResponse};
 use self::subscription_dto::{
     CreateSubscriptionRequest, SubscriptionListResponse, SubscriptionResponse,
@@ -55,6 +56,7 @@ use self::work_claim_dto::{ClaimRequest, FencedActionRequest, RenewRequest, Work
 
 pub mod enrollment_dto;
 pub mod request_dto;
+pub mod route_dto;
 pub mod schema_dto;
 pub mod subscription_dto;
 pub mod work_claim_dto;
@@ -312,6 +314,51 @@ where
     }
 }
 
+/// Answers the one read an external scheduler needs before it can propose
+/// a claim (ADR-0011): which of the caller's own routes are still
+/// unclaimed. Composes ILK-003's route listing with ILK-011's active-claim
+/// check without either kernel module depending on the other's
+/// repository, the same way `SubscriptionRouter` composes ILK-010 and
+/// ILK-003. The caller's own verified identity is always the destination
+/// queried -- never a request parameter -- so this exposes no route
+/// belonging to another service.
+struct EligibleRouteQuery<'a, RR, WR> {
+    routes: &'a RouteService<RR>,
+    work_claims: &'a WorkClaimService<WR>,
+}
+
+impl<'a, RR, WR> EligibleRouteQuery<'a, RR, WR> {
+    const fn new(routes: &'a RouteService<RR>, work_claims: &'a WorkClaimService<WR>) -> Self {
+        Self {
+            routes,
+            work_claims,
+        }
+    }
+}
+
+impl<RR, WR> EligibleRouteQuery<'_, RR, WR>
+where
+    RR: RouteRepository,
+    WR: WorkClaimRepository,
+{
+    fn eligible_for(
+        &self,
+        destination_service: ActorId,
+        now: i64,
+    ) -> Result<Vec<Route>, RequestError> {
+        let routes = self.routes.list_for_destination(destination_service)?;
+        let route_ids: Vec<RouteId> = routes.iter().map(Route::id).collect();
+        let claimed = self
+            .work_claims
+            .active_route_ids(&route_ids, now)
+            .map_err(|error| RequestError::Repository(error.to_string()))?;
+        Ok(routes
+            .into_iter()
+            .filter(|route| !claimed.contains(&route.id()))
+            .collect())
+    }
+}
+
 pub fn serve(application: Application) -> std::io::Result<()> {
     let address = env::var("BIND_ADDRESS").unwrap_or_else(|_| DEFAULT_ADDRESS.to_owned());
     let port = env::var("PORT").unwrap_or_else(|_| DEFAULT_PORT.to_owned());
@@ -392,6 +439,13 @@ fn dispatch(request: ParsedRequest, application: &Application) -> Response {
         let path = request.path.split('?').next().unwrap_or(&request.path);
         if path == "/v1/authority/schemas" {
             return publish_schema(&request, service_id, application.schemas());
+        }
+        if path == "/v1/routes/eligible" {
+            return list_eligible_routes(
+                service_id,
+                application.routes(),
+                application.work_claims(),
+            );
         }
         if let Some(route_id) = path
             .strip_prefix("/v1/routes/")
@@ -657,6 +711,7 @@ fn is_governed_route(path: &str) -> bool {
         || path == "/v1/authority/schemas"
         || path == "/v1/requests"
         || path.starts_with("/v1/requests/")
+        || path == "/v1/routes/eligible"
         || (path.starts_with("/v1/routes/") && path.ends_with("/claims"))
         || is_claim_action_path(path)
 }
@@ -668,6 +723,7 @@ fn is_supported_governed_method(method: &str, path: &str) -> bool {
         || (path == "/v1/authority/schemas" && method == "POST")
         || (path == "/v1/requests" && method == "POST")
         || (path.starts_with("/v1/requests/") && method == "GET")
+        || (path == "/v1/routes/eligible" && method == "GET")
         || (path.starts_with("/v1/routes/") && path.ends_with("/claims") && method == "POST")
         || (is_claim_action_path(path) && method == "POST")
 }
@@ -1106,6 +1162,31 @@ fn schema_error_response(error: &AuthorityError) -> Response {
     }
 }
 
+/// Lists the caller's own eligible routes -- materialized, incomplete, and
+/// not currently claimed by anyone -- so an external scheduler (Taskmaster,
+/// ADR-0011) has something to propose a claim against. The destination
+/// queried is always the caller's own verified identity, never a request
+/// parameter, so this exposes no other service's routes. A plain read of
+/// the caller's own data, like `GET /v1/subscriptions`, so it requires no
+/// separate ILK-002 authority decision.
+fn list_eligible_routes<RR: RouteRepository, WR: WorkClaimRepository>(
+    service_id: ActorId,
+    routes: &RouteService<RR>,
+    work_claims: &WorkClaimService<WR>,
+) -> Response {
+    let query = EligibleRouteQuery::new(routes, work_claims);
+    match query.eligible_for(service_id, unix_time()) {
+        Ok(values) => json_response(
+            "200 OK",
+            &values
+                .iter()
+                .map(RouteResponse::from)
+                .collect::<EligibleRouteListResponse>(),
+        ),
+        Err(error) => request_error_response(&error),
+    }
+}
+
 /// Claims `route_id` for the caller's own verified identity and instance
 /// (`worker_service`/`worker_instance`), never a request-body field --
 /// exactly like every other governed handler, a caller can only ever act
@@ -1282,7 +1363,8 @@ fn work_claim_error_response(error: &WorkClaimError) -> Response {
     match error {
         WorkClaimError::InvalidClaimId
         | WorkClaimError::InvalidFencingToken
-        | WorkClaimError::InvalidLease => json_response(
+        | WorkClaimError::InvalidLease
+        | WorkClaimError::InvalidTimestamp => json_response(
             "400 Bad Request",
             &GovernedErrorResponse::invalid_work_claim_request(),
         ),
@@ -2894,6 +2976,20 @@ mod tests {
                     .cloned()
                     .collect())
             }
+
+            fn list_for_destination(
+                &self,
+                destination_service: ActorId,
+            ) -> Result<Vec<Route>, RequestError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|route| route.destination_service() == destination_service)
+                    .cloned()
+                    .collect())
+            }
         }
 
         fn active_subscription(owner: ActorId, event_type: &str) -> Subscription {
@@ -3028,7 +3124,7 @@ mod tests {
     }
 
     mod work_claim_routes {
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
         use std::sync::{Arc, Mutex};
 
         use super::super::*;
@@ -3141,6 +3237,21 @@ mod tests {
                     .iter()
                     .find(|claim| claim.id() == claim_id)
                     .cloned())
+            }
+
+            fn active_route_ids(
+                &self,
+                route_ids: &[RouteId],
+                now: i64,
+            ) -> Result<HashSet<RouteId>, WorkClaimError> {
+                Ok(self
+                    .claims
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|claim| route_ids.contains(&claim.route_id()) && claim.is_current(now))
+                    .map(WorkClaim::route_id)
+                    .collect())
             }
         }
 
@@ -3451,6 +3562,211 @@ mod tests {
             let response = release_claim_route(&request, &claim_id, &claims);
 
             assert_eq!(response.status, "415 Unsupported Media Type");
+        }
+    }
+
+    mod eligible_route_routes {
+        use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
+
+        use super::super::*;
+        use crate::kernel::work_claims::{WorkClaim, WorkClaimStatus};
+
+        #[derive(Clone, Default)]
+        struct MemoryRoutes(Arc<Mutex<Vec<Route>>>);
+
+        impl MemoryRoutes {
+            fn seed(&self, route: Route) {
+                self.0.lock().unwrap().push(route);
+            }
+        }
+
+        impl RouteRepository for MemoryRoutes {
+            fn materialize(&self, route: Route) -> Result<Route, RequestError> {
+                self.0.lock().unwrap().push(route.clone());
+                Ok(route)
+            }
+
+            fn list_for_request(&self, request_id: RequestId) -> Result<Vec<Route>, RequestError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|route| route.request_id() == request_id)
+                    .cloned()
+                    .collect())
+            }
+
+            fn list_for_destination(
+                &self,
+                destination_service: ActorId,
+            ) -> Result<Vec<Route>, RequestError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|route| route.destination_service() == destination_service)
+                    .cloned()
+                    .collect())
+            }
+        }
+
+        #[derive(Clone, Default)]
+        struct MemoryWorkClaims(Arc<Mutex<Vec<WorkClaim>>>);
+
+        impl MemoryWorkClaims {
+            fn seed(&self, claim: WorkClaim) {
+                self.0.lock().unwrap().push(claim);
+            }
+        }
+
+        impl WorkClaimRepository for MemoryWorkClaims {
+            fn claim(
+                &self,
+                _route_id: RouteId,
+                _worker_service: ActorId,
+                _worker_instance: InstanceId,
+                _lease_expires_at: i64,
+                _now: i64,
+            ) -> Result<WorkClaim, WorkClaimError> {
+                Err(WorkClaimError::Repository(
+                    "not exercised by these tests".to_owned(),
+                ))
+            }
+
+            fn renew(
+                &self,
+                _claim_id: ClaimId,
+                _fencing_token: i64,
+                _lease_expires_at: i64,
+                _now: i64,
+            ) -> Result<WorkClaim, WorkClaimError> {
+                Err(WorkClaimError::Repository(
+                    "not exercised by these tests".to_owned(),
+                ))
+            }
+
+            fn release(
+                &self,
+                _claim_id: ClaimId,
+                _fencing_token: i64,
+                _now: i64,
+            ) -> Result<WorkClaim, WorkClaimError> {
+                Err(WorkClaimError::Repository(
+                    "not exercised by these tests".to_owned(),
+                ))
+            }
+
+            fn complete(
+                &self,
+                _claim_id: ClaimId,
+                _fencing_token: i64,
+                _now: i64,
+            ) -> Result<WorkClaim, WorkClaimError> {
+                Err(WorkClaimError::Repository(
+                    "not exercised by these tests".to_owned(),
+                ))
+            }
+
+            fn find(&self, _claim_id: ClaimId) -> Result<Option<WorkClaim>, WorkClaimError> {
+                Err(WorkClaimError::Repository(
+                    "not exercised by these tests".to_owned(),
+                ))
+            }
+
+            fn active_route_ids(
+                &self,
+                route_ids: &[RouteId],
+                now: i64,
+            ) -> Result<HashSet<RouteId>, WorkClaimError> {
+                Ok(self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|claim| route_ids.contains(&claim.route_id()) && claim.is_current(now))
+                    .map(WorkClaim::route_id)
+                    .collect())
+            }
+        }
+
+        fn route(destination: ActorId, created_at: i64) -> Route {
+            Route::create(
+                ActorId::new(),
+                RequestId::new(),
+                SubscriptionId::new(),
+                destination,
+                created_at,
+            )
+            .unwrap()
+        }
+
+        fn claim(route_id: RouteId, lease_expires_at: i64) -> WorkClaim {
+            WorkClaim::restore(
+                ClaimId::new(),
+                route_id,
+                ActorId::new(),
+                InstanceId::new(),
+                1,
+                WorkClaimStatus::Active,
+                0,
+                lease_expires_at,
+            )
+            .unwrap()
+        }
+
+        #[test]
+        fn returns_only_unclaimed_routes_for_the_callers_own_destination() {
+            let destination = ActorId::new();
+            let routes = MemoryRoutes::default();
+            let claimed_route = route(destination, 1);
+            let unclaimed_route = route(destination, 2);
+            routes.seed(claimed_route.clone());
+            routes.seed(unclaimed_route.clone());
+            let work_claims = MemoryWorkClaims::default();
+            work_claims.seed(claim(claimed_route.id(), unix_time() + 1_000));
+            let route_service = RouteService::new(routes);
+            let claim_service = WorkClaimService::new(work_claims);
+
+            let response = list_eligible_routes(destination, &route_service, &claim_service);
+
+            assert_eq!(response.status, "200 OK");
+            assert!(response.body.contains(&unclaimed_route.id().to_string()));
+            assert!(!response.body.contains(&claimed_route.id().to_string()));
+        }
+
+        #[test]
+        fn a_route_becomes_eligible_again_once_its_claim_expires() {
+            let destination = ActorId::new();
+            let routes = MemoryRoutes::default();
+            let expired_route = route(destination, 1);
+            routes.seed(expired_route.clone());
+            let work_claims = MemoryWorkClaims::default();
+            work_claims.seed(claim(expired_route.id(), unix_time() - 50));
+            let route_service = RouteService::new(routes);
+            let claim_service = WorkClaimService::new(work_claims);
+
+            let response = list_eligible_routes(destination, &route_service, &claim_service);
+
+            assert!(response.body.contains(&expired_route.id().to_string()));
+        }
+
+        #[test]
+        fn a_caller_never_sees_another_services_routes() {
+            let destination = ActorId::new();
+            let other_service = ActorId::new();
+            let routes = MemoryRoutes::default();
+            let other_route = route(other_service, 1);
+            routes.seed(other_route.clone());
+            let route_service = RouteService::new(routes);
+            let claim_service = WorkClaimService::new(MemoryWorkClaims::default());
+
+            let response = list_eligible_routes(destination, &route_service, &claim_service);
+
+            assert_eq!(response.status, "200 OK");
+            assert!(!response.body.contains(&other_route.id().to_string()));
         }
     }
 }

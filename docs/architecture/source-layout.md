@@ -15,6 +15,7 @@ src/
 ├── http/
 │   ├── enrollment_dto.rs   # strict initial-enrollment JSON profile
 │   ├── request_dto.rs      # ILK-003 request-submission JSON wire format
+│   ├── route_dto.rs        # eligible-route JSON wire format (ADR-0011)
 │   ├── schema_dto.rs       # ILK-002 schema-publication JSON wire format
 │   ├── subscription_dto.rs # ILK-010 subscription JSON wire format
 │   └── work_claim_dto.rs   # ILK-011 work-claim JSON wire format

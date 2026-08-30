@@ -4,6 +4,8 @@
 //! from `active`, enforced structurally by `protect_work_claim()` in
 //! migration 0017, not merely by convention here.
 
+use std::collections::HashSet;
+
 use r2d2_postgres::postgres::{Row, Transaction};
 
 use crate::kernel::identity::ActorId;
@@ -45,6 +47,8 @@ const RENEW_SQL: &str = "UPDATE work_claims SET lease_expires_at = $2 \
 const TRANSITION_SQL: &str = "UPDATE work_claims SET status = $2 WHERE claim_id = $1::text::uuid \
     RETURNING claim_id::text, route_id::text, worker_service_id::text, worker_instance_id::text, \
               fencing_token, status, claimed_at, lease_expires_at";
+const ACTIVE_ROUTE_IDS_SQL: &str = "SELECT DISTINCT route_id::text FROM work_claims \
+    WHERE route_id::text = ANY($1) AND status = 'active' AND lease_expires_at > $2";
 
 #[derive(Clone)]
 pub struct PostgresWorkClaimRepository {
@@ -176,6 +180,30 @@ impl WorkClaimRepository for PostgresWorkClaimRepository {
             .as_ref()
             .map(claim_from_row)
             .transpose()
+    }
+
+    fn active_route_ids(
+        &self,
+        route_ids: &[RouteId],
+        now: i64,
+    ) -> Result<HashSet<RouteId>, WorkClaimError> {
+        if route_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let route_ids: Vec<String> = route_ids.iter().map(ToString::to_string).collect();
+        let mut connection = self.database.connection().map_err(repository_error)?;
+        connection
+            .query(ACTIVE_ROUTE_IDS_SQL, &[&route_ids, &now])
+            .map_err(repository_error)?
+            .iter()
+            .map(|row| {
+                row.get::<_, String>("route_id")
+                    .parse::<RouteId>()
+                    .map_err(|_| {
+                        WorkClaimError::Repository("stored route ID is invalid".to_owned())
+                    })
+            })
+            .collect()
     }
 }
 

@@ -3,6 +3,7 @@
 //! fencing token so a stale holder can never complete or renew after losing
 //! its claim.
 
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
@@ -207,6 +208,16 @@ pub trait WorkClaimRepository: Send + Sync {
     ) -> Result<WorkClaim, WorkClaimError>;
 
     fn find(&self, claim_id: ClaimId) -> Result<Option<WorkClaim>, WorkClaimError>;
+
+    /// Returns which of `route_ids` currently have a live, unexpired
+    /// active claim -- the read an eligible-route query (ADR-0011) uses to
+    /// exclude routes that are already being worked. A route absent from
+    /// the returned set is eligible to claim.
+    fn active_route_ids(
+        &self,
+        route_ids: &[RouteId],
+        now: i64,
+    ) -> Result<HashSet<RouteId>, WorkClaimError>;
 }
 
 #[derive(Clone)]
@@ -283,6 +294,17 @@ where
     pub fn find(&self, claim_id: ClaimId) -> Result<Option<WorkClaim>, WorkClaimError> {
         self.repository.find(claim_id)
     }
+
+    pub fn active_route_ids(
+        &self,
+        route_ids: &[RouteId],
+        now: i64,
+    ) -> Result<HashSet<RouteId>, WorkClaimError> {
+        if now < 0 {
+            return Err(WorkClaimError::InvalidTimestamp);
+        }
+        self.repository.active_route_ids(route_ids, now)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -290,6 +312,7 @@ pub enum WorkClaimError {
     InvalidClaimId,
     InvalidFencingToken,
     InvalidLease,
+    InvalidTimestamp,
     RouteNotFound(RouteId),
     AlreadyClaimed(RouteId),
     NotFound(ClaimId),
@@ -305,6 +328,7 @@ impl Display for WorkClaimError {
                 formatter.write_str("fencing token must be a positive integer")
             }
             Self::InvalidLease => formatter.write_str("claim lease window is invalid"),
+            Self::InvalidTimestamp => formatter.write_str("timestamp must not be negative"),
             Self::RouteNotFound(id) => write!(formatter, "route {id} was not found"),
             Self::AlreadyClaimed(id) => write!(formatter, "route {id} is already claimed"),
             Self::NotFound(id) => write!(formatter, "claim {id} was not found"),

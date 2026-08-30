@@ -281,7 +281,7 @@ capability is deferred — its full text lives in
 | ILK-008 | Audit | **MVP** (minimum evidence to reconstruct the vertical slice already exists per-capability; a unified audit log is Kernel 1.0) |
 | ILK-009 | Events | **Post-MVP / Kernel 1.0** — unimplemented, not required by the vertical slice |
 | ILK-010 | Subscriptions | **Split** — inclusive create/list/disable/materialize is MVP; exclusive groups, `all_of` selectors, backlog matching, cursors, route history are Kernel 1.0 |
-| ILK-011 | Work claims | **Split** — claim/renew/release/complete with fencing is MVP (done); the eligible-route query is MVP (not yet done); administrative forced revocation is Kernel 1.0 |
+| ILK-011 | Work claims | **Split** — claim/renew/release/complete with fencing is MVP (done); the eligible-route query is MVP (done); administrative forced revocation is Kernel 1.0 |
 | ILK-012 | Idempotency | **Split** — request-level idempotency (via ILK-003) is MVP; idempotency for artifact writes/events is Kernel 1.0, blocked on ILK-006/009 |
 | ILK-013 | Mediation | **MVP** — structural invariant, already true by construction |
 
@@ -932,8 +932,14 @@ Acceptance criteria:
   and for which worker; readiness and capacity are scheduler policy
   inputs, not kernel filters (see
   [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md)).
-  **MVP — and the single largest remaining gap before `v0.1.0`**; see
-  [Section 6](#6-current-implementation-status).
+  **MVP — done for the minimum shape**: `GET /v1/routes/eligible`
+  (`EligibleRouteQuery`, composing ILK-003's `list_for_destination` with
+  ILK-011's `active_route_ids`) returns the caller's own materialized
+  routes that have no current, unexpired active claim. It does not
+  re-check subscription-active or handshake state at query time (a route
+  only exists because both were true at materialization time) — doing so
+  is a **Post-MVP / Kernel 1.0** refinement, not a gap in the query
+  existing at all.
 - If an exclusive destination instance or service fails, its assignment
   lease expires and the same route can be fenced and reassigned to
   another eligible service in the consumer group. No new request is
@@ -955,7 +961,8 @@ Acceptance criteria:
 - A scheduler deferring claims for saturation, stale health, or lack of
   capacity does not advance or lose the durable cursor; resumed claiming
   picks up from the same eligible set (ADR-0011). **External
-  infrastructure** — depends on the eligible-route query (MVP gap above).
+  infrastructure** — the eligible-route query it reads is MVP-complete;
+  the deferral/retry policy itself is Taskmaster's, not the kernel's.
 - One unreachable subscriber does not prevent kernel startup or discovery
   of other subscribers; its delivery remains paused and is retried with
   backoff. **Post-MVP** (production handshake transport hardening).
@@ -1008,9 +1015,10 @@ Implementation status:
   subscriptions active at submission time are considered), route
   transition history, delivery cursors, and production outbound handshake
   transport.
-- Remaining MVP gap: the eligible-route query contract external scheduler
-  services will use does not exist yet (ADR-0011). See
-  [Section 6](#6-current-implementation-status).
+- Complete (this is MVP): the eligible-route query external scheduler
+  services use (ADR-0011) — `GET /v1/routes/eligible`, backed by
+  `EligibleRouteQuery` in `src/http.rs`. See ILK-011's own status below
+  for the composition and its tests.
 - External infrastructure: capacity-aware delivery, worker/node placement,
   and retry-timing policy. Those belong to an external scheduler service,
   not the kernel (ADR-0011) — see
@@ -1020,10 +1028,9 @@ Implementation status:
 
 **Scope: Split.**
 
-**MVP**: atomic claim/renew/release/complete with lease and fencing, and
-one active claim per route (all Complete). The minimal eligible-route
-query a scheduler needs to find something to claim is also MVP, but is not
-yet built — see [Section 6](#6-current-implementation-status).
+**MVP**: atomic claim/renew/release/complete with lease and fencing, one
+active claim per route, and the minimal eligible-route query a scheduler
+needs to find something to claim (all Complete).
 
 **Post-MVP / Kernel 1.0**: administrator-authorized forced claim
 revocation (only expiry, release, and completion exist today — no
@@ -1098,11 +1105,24 @@ Implementation status:
 - Concurrency proven directly: sixteen threads racing to claim the same
   route produce exactly one success and fifteen `AlreadyClaimed` results
   (`tests/work_claim_contract.rs`), independent of PostgreSQL.
-- Remaining MVP gap: the eligible-route query a scheduler calls before it
-  can propose a claim at all (see
-  [Section 6](#6-current-implementation-status)) — `claim`/`renew`/
-  `release`/`complete` are done, but nothing yet tells a caller *which*
-  route IDs exist to claim.
+- Complete: the eligible-route query — `GET /v1/routes/eligible`, backed
+  by `EligibleRouteQuery` in `src/http.rs`. It composes
+  `RouteRepository::list_for_destination` (ILK-003, new) with
+  `WorkClaimRepository::active_route_ids` (ILK-011, new, a bulk "which of
+  these routes have a live claim" read) without either kernel module
+  depending on the other's repository — the same compositional pattern
+  `SubscriptionRouter` uses to bridge ILK-010 and ILK-003. The destination
+  queried is always the caller's own verified identity, never a request
+  parameter, so a caller can only ever see its own eligible routes; it
+  requires no separate ILK-002 authority decision, matching every other
+  read of the caller's own data (`GET /v1/subscriptions`,
+  `GET /v1/requests/{id}`). Proven at the domain level
+  (`tests/route_materialization_contract.rs`,
+  `tests/work_claim_contract.rs`, `tests/postgres_route_repository.rs`,
+  `tests/postgres_work_claim_repository.rs`) and at the HTTP level
+  (colocated `eligible_route_routes` tests in `src/http.rs`), including
+  that a route with an expired claim becomes eligible again and that a
+  caller never sees another service's routes.
 - Post-MVP / Kernel 1.0: administrator-authorized forced claim revocation;
   route-revision/assignment-ID distinctness (currently conflated with the
   fencing token as a deliberate simplification).
@@ -1193,10 +1213,11 @@ Each requirement MUST have automated tests at the lowest practical layer:
 unit tests for policy and state-transition rules, database integration
 tests for immutability/uniqueness/concurrency/rollback, contract tests for
 authentication/authorization/validation/idempotency, and end-to-end tests
-for the full vertical slice. Steps 1–13 below are individually proven
-today; step 14 (failure/recovery) is Section 5. What is *not* yet proven
-is the whole chain in one continuous run against a live PostgreSQL
-backend, since step 9 does not exist as a callable contract yet.
+for the full vertical slice. Steps 1–13 below are each individually proven
+today, including step 9; step 14 (failure/recovery) is Section 5. What is
+*not* yet proven is all thirteen steps chained together in one continuous
+run against a live PostgreSQL backend — each is proven in isolation, not
+yet as a single scenario.
 
 | Step | Mechanism | Proof today |
 | --- | --- | --- |
@@ -1208,7 +1229,7 @@ backend, since step 9 does not exist as a callable contract yet.
 | 6. Accepted Request is durably persisted in PostgreSQL | `PostgresRequestRepository` | `tests/postgres_request_repository.rs` (ignored, live-DB) |
 | 7. A basic active inclusive subscription matches the Request | `SubscriptionRepository::find_active_by_event_type` | `tests/subscription_contract.rs::find_active_by_event_type_matches_across_services_and_excludes_disabled` |
 | 8. Kernel materializes a durable route | `SubscriptionRouter` → `RouteService::materialize` | `tests/route_materialization_contract.rs`, `tests/postgres_route_repository.rs` (ignored, live-DB) |
-| 9. External scheduler queries eligible work | **Not implemented** | — this is the punch-list gap; see Section 6 |
+| 9. External scheduler queries eligible work | `GET /v1/routes/eligible` → `EligibleRouteQuery` | `tests/route_materialization_contract.rs`, `tests/work_claim_contract.rs`, colocated `eligible_route_routes` tests in `src/http.rs`, `tests/postgres_route_repository.rs` and `tests/postgres_work_claim_repository.rs` (ignored, live-DB) |
 | 10. Scheduler proposes a worker/route claim | `POST /v1/routes/{route_id}/claims` | `tests/work_claim_contract.rs`, colocated `work_claim_routes` HTTP tests in `src/http.rs` |
 | 11. Kernel atomically arbitrates the claim (lease/fencing) | `WorkClaimService::claim` | `tests/work_claim_contract.rs`, `tests/postgres_work_claim_repository.rs` (ignored, live-DB) |
 | 12. Worker completes the work through the kernel | `POST /v1/claims/{id}/complete` | `tests/work_claim_contract.rs::completion_is_terminal_and_cannot_be_renewed_or_released_afterward` |
@@ -1235,28 +1256,26 @@ for `v0.1.0`: ILK-001 (Identity), ILK-002's request-acceptance authority,
 ILK-003's immutable requests and inclusive route materialization, ILK-004,
 ILK-007's authority-decision evidence, ILK-008's per-capability audit,
 ILK-010's inclusive subscriptions, and ILK-011's claim/renew/release/
-complete with fencing.
+complete with fencing *and* the eligible-route query
+(`GET /v1/routes/eligible`).
 
 What remains before tagging `v0.1.0`:
 
-1. **Finish the minimal eligible-route query needed by Taskmaster**
-   (ILK-010/ILK-011 gap, vertical-slice step 9) — a read-only, authenticated
-   query returning incomplete routes with no current active claim,
-   filtered to routes the calling worker class is entitled to see. This is
-   the single largest remaining gap; nothing downstream of it (claim,
-   complete) is blocked on new kernel code.
-2. **Wire a simple external Taskmaster against it** —
+1. **Wire a simple external Taskmaster against the eligible-route query** —
    `infernal-taskmaster-simple` is currently an eight-line stub; it needs
-   enough logic to call the query above and propose a claim.
-3. **Wire a simple worker through claim → execution → completion** — using
+   enough logic to call `GET /v1/routes/eligible` and propose a claim.
+   Nothing on the kernel side blocks this: the query, and the
+   claim/complete routes it would call next, are already MVP-complete.
+2. **Wire a simple worker through claim → execution → completion** — using
    the existing `POST /v1/routes/{route_id}/claims` and
    `POST /v1/claims/{id}/complete` routes, which are already MVP-complete.
-4. **Close any missing audit/idempotency transaction requirements required
+3. **Close any missing audit/idempotency transaction requirements required
    by that path** — expected to be zero new invariants, since the
-   individual pieces (acceptance, materialization, claim, completion) are
-   each already transactional; this step is about confirming that,
+   individual pieces (acceptance, materialization, eligible-route query,
+   claim, completion) are each already transactional or a plain read of
+   already-committed state; this step is about confirming that,
    end-to-end.
-5. **Run the failure/recovery acceptance tests** (Section 5) as one
+4. **Run the failure/recovery acceptance tests** (Section 5) as one
    continuous scenario, including the restart proof that today only
    exists per-capability.
 
@@ -1294,7 +1313,11 @@ Cross-referenced (see Section 3 for full invariants/acceptance criteria):
   cursors and replay semantics beyond the current active-set match; route
   transition history; hardened production outbound handshake transport.
 - **ILK-011** — administrator-authorized forced claim revocation; treating
-  route revision and assignment ID as distinct from the fencing token.
+  route revision and assignment ID as distinct from the fencing token;
+  generalizing the eligible-route query (`GET /v1/routes/eligible`) with
+  pagination, an explicit worker-class/capability declaration distinct
+  from destination identity, and richer freshness/staleness semantics
+  than a plain committed read (ADR-0011 open decision).
 - **ILK-012** — idempotency for mediated artifact writes and promised
   events, blocked on ILK-006 and ILK-009 existing first.
 - **Multi-replica kernel correctness** — `GET /v1/kernel-identity` behind
@@ -1405,8 +1428,9 @@ backpressure, retry timing, Kubernetes placement, and infrastructure
 health/capacity interpretation. See
 [ADR-0011](decisions/0011-move-scheduling-policy-outside-the-kernel.md).
 The kernel exposes only the trusted state and atomic operations necessary
-for Taskmaster to make proposals (the eligible-route query, and the
-claim/renew/release/complete contract) and remains the final arbiter of
+for Taskmaster to make proposals — the eligible-route query
+(`GET /v1/routes/eligible`, MVP-complete) and the claim/renew/release/
+complete contract (also MVP-complete) — and remains the final arbiter of
 eligibility and ownership. `infernal-taskmaster-simple` is the reference
 implementation and is currently an unimplemented stub; wiring a minimal
 version of it against the eligible-route query is on the `v0.1.0` punch
@@ -1459,12 +1483,18 @@ anticipated this MVP/Kernel-1.0 split (explicit delivery modes, scheduling
 policy moved outside the kernel, and a stateless external evaluator,
 respectively) and remain fully consistent with it.
 
-The requirements intentionally do not choose these implementation
-details. The first is now the most urgent, since it gates `v0.1.0`:
+The requirements intentionally do not choose most of these implementation
+details. One is resolved: the eligible-route query's minimum shape
+(ADR-0011) is now `GET /v1/routes/eligible`, scoped to the caller's own
+verified destination identity, with no pagination and no separate
+worker-class declaration (a route's own destination *is* the worker
+class for `v0.1.0`'s inclusive-only slice) — deliberately the smallest
+contract that unblocks Taskmaster, not a general one. Generalizing it
+(pagination, an explicit worker-class/capability declaration distinct
+from destination identity, and freshness/staleness semantics beyond a
+plain committed read) is Kernel 1.0, tracked alongside exclusive consumer
+groups in Section 7. The remaining open decisions:
 
-- the eligible-route query contract's shape, worker-class declaration,
-  pagination, and freshness semantics for external scheduler services
-  (ADR-0011) — **blocks `v0.1.0`**;
 - service-owned artifact-schema and permission-policy-schema formats;
 - constrained policy evaluation language and scope matching rules;
 - schema publication, administrator approval, and revocation workflow;

@@ -3,7 +3,7 @@
 //! that a fenced-out holder can never renew or complete after losing its
 //! claim.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -149,6 +149,21 @@ impl WorkClaimRepository for MemoryWorkClaims {
             .iter()
             .find(|claim| claim.id() == claim_id)
             .cloned())
+    }
+
+    fn active_route_ids(
+        &self,
+        route_ids: &[RouteId],
+        now: i64,
+    ) -> Result<HashSet<RouteId>, WorkClaimError> {
+        Ok(self
+            .claims
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|claim| route_ids.contains(&claim.route_id()) && claim.is_current(now))
+            .map(WorkClaim::route_id)
+            .collect())
     }
 }
 
@@ -350,4 +365,31 @@ fn concurrent_claim_attempts_on_the_same_route_produce_exactly_one_active_holder
             .count(),
         15
     );
+}
+
+#[test]
+fn active_route_ids_reports_only_currently_claimed_routes_among_those_asked_about() {
+    let destination = ActorId::new();
+    let claimed_route = RouteId::new();
+    let expired_route = RouteId::new();
+    let untouched_route = RouteId::new();
+    let repository = MemoryWorkClaims::with_route(claimed_route, destination);
+    repository
+        .route_destinations
+        .lock()
+        .unwrap()
+        .insert(expired_route, destination);
+    let claims = WorkClaimService::new(repository);
+    claims
+        .claim(claimed_route, destination, InstanceId::new(), 100, 0)
+        .unwrap();
+    claims
+        .claim(expired_route, destination, InstanceId::new(), 50, 0)
+        .unwrap();
+
+    let active = claims
+        .active_route_ids(&[claimed_route, expired_route, untouched_route], 60)
+        .unwrap();
+
+    assert_eq!(active, HashSet::from([claimed_route]));
 }

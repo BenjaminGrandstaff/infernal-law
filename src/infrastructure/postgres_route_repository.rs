@@ -26,6 +26,10 @@ const LIST_FOR_REQUEST_SQL: &str = "SELECT route_id::text, source_service_id::te
         request_id::text, subscription_id::text, destination_service_id::text, created_at \
     FROM request_routes \
     WHERE request_id = $1::text::uuid ORDER BY created_at, route_id";
+const LIST_FOR_DESTINATION_SQL: &str = "SELECT route_id::text, source_service_id::text, \
+        request_id::text, subscription_id::text, destination_service_id::text, created_at \
+    FROM request_routes \
+    WHERE destination_service_id = $1::text::uuid ORDER BY created_at, route_id";
 
 #[derive(Clone)]
 pub struct PostgresRouteRepository {
@@ -85,6 +89,22 @@ impl RouteRepository for PostgresRouteRepository {
         let mut connection = self.database.connection().map_err(repository_error)?;
         connection
             .query(LIST_FOR_REQUEST_SQL, &[&request_id.to_string()])
+            .map_err(repository_error)?
+            .iter()
+            .map(route_from_row)
+            .collect()
+    }
+
+    fn list_for_destination(
+        &self,
+        destination_service: ActorId,
+    ) -> Result<Vec<Route>, RequestError> {
+        let mut connection = self.database.connection().map_err(repository_error)?;
+        connection
+            .query(
+                LIST_FOR_DESTINATION_SQL,
+                &[&destination_service.to_string()],
+            )
             .map_err(repository_error)?
             .iter()
             .map(route_from_row)

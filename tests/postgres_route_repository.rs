@@ -119,6 +119,12 @@ fn route_materialization_is_idempotent_and_survives_reconnection() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].destination_service(), destination.id());
 
+    let by_destination = second_process
+        .routes()
+        .list_for_destination(destination.id())
+        .unwrap();
+    assert_eq!(by_destination, vec![first_route.clone()]);
+
     assert_database_guards(request_id, first_route.id());
 }
 
