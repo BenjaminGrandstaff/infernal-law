@@ -501,6 +501,21 @@ Implementation status:
   service-instance discovery; richer key rotation/lifecycle
   administration; and hardened instance reconciliation/recovery behavior
   (see [Section 8](#8-future-kernel-kernel-10)).
+- **Gap found by live testing (2026-08-30, infernal-librarian-simple's own
+  live vertical-slice run):** the "signed lease-renewal transport" note
+  above is about hardening `kernel::handshakes`, which is the *kernel*
+  challenging a push-delivery subscriber — not a route a *client* instance
+  can call to renew its own lease before `DEFAULT_LEASE_SECONDS` (60s)
+  expires. No such route exists today; `/v1/enrollments` is the only way
+  to get a valid instance/key pair, and its challenge is single-use and
+  only issued out of band by an operator. Concretely: every reference
+  service that polls (`infernal-taskmaster-simple`,
+  `infernal-worker-simple`, `infernal-librarian-simple`) starts failing
+  every signed call with 401 once it has been running for about a minute,
+  and recovering requires a full process restart plus a fresh operator-
+  issued enrollment challenge — there is no client-side fix. This is an
+  ILK-001 gap distinct from the push-handshake item above, not yet
+  reflected as its own Kernel 1.0 line.
 
 See the [direct service protocol](direct-service-protocol.md) and
 [ADR-0003](decisions/0003-direct-signed-service-rest.md).
