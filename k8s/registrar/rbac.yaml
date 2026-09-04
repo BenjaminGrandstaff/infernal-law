@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: infernal-registrar
+---
+# The registrar resolves ServiceAccount UIDs rather than trusting them from
+# its manifest, so it needs to read ServiceAccounts -- and nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infernal-registrar-serviceaccount-reader
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infernal-registrar-serviceaccount-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: infernal-registrar-serviceaccount-reader
+subjects:
+  - kind: ServiceAccount
+    name: infernal-registrar
+    namespace: default

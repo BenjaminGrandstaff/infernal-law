@@ -1,0 +1,47 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: infernal-registrar
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: infernal-registrar
+      containers:
+        - name: registrar
+          image: localhost/infernal-law:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/infernal-registrar"]
+          env:
+            # Deliberately a different Secret from the kernel's own:
+            # the registrar writes administrative tables the kernel never
+            # writes, and should hold a role scoped to exactly that.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: infernal-registrar-database
+                  key: url
+            - name: REGISTRAR_MANIFEST
+              value: /etc/infernal-registrar/services.json
+            - name: REGISTRAR_ADMINISTRATOR
+              value: registrar-job
+          volumeMounts:
+            - name: manifest
+              mountPath: /etc/infernal-registrar
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 250m, memory: 64Mi }
+      volumes:
+        # Created from registrar/services.json, for example:
+        #   kubectl create configmap infernal-registrar-manifest \
+        #     --from-file=services.json=registrar/services.json
+        - name: manifest
+          configMap:
+            name: infernal-registrar-manifest

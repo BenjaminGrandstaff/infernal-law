@@ -1,6 +1,6 @@
 # ADR-0015: Split enrollment into a self-service nonce and an out-of-band registrar
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-04
 - Deciders: TODO
 - Related: [ADR-0002](0002-external-kubernetes-authenticator.md),
@@ -152,6 +152,20 @@ updates the bound UID turns a confusing outage into a no-op.
 - Decide whether `ENROLLMENT_CHALLENGE` remains supported or is removed once the
   route exists.
 
+## Implementation
+
+Both halves are built.
+
+- The kernel route is `POST /v1/enrollments/challenges`
+  (`EnrollmentService::issue_challenge_for_workload`).
+- The registrar is `src/bin/registrar.rs`, deployed by `k8s/registrar/` as a
+  Job with its own ServiceAccount and its own database Secret. Its desired
+  state is `registrar/services.json`. It is idempotent: a second run reports
+  `0 changed`.
+- Seeding the sentinel schema versions turned out to be a prerequisite
+  (migration `0018`); without those rows every non-artifact governed action
+  failed closed with `503`.
+
 ## Validation
 
 - Deleting an enrolled Pod produces a replacement that reaches a working state
@@ -164,3 +178,9 @@ updates the bound UID turns a confusing outage into a no-op.
 - Deleting and recreating a ServiceAccount is followed by successful enrollment
   once the registrar has reconciled the new UID.
 - No manual `INSERT` is required to bring a cluster from empty to serving.
+
+All of the above were exercised on k3s on 2026-09-04. The kernel database was
+dropped and recreated empty; the kernel migrated itself (26 tables, 18
+migrations, both sentinels), the registrar seeded 8 identities, 5 bindings, 5
+admissions and 3 grants, and all seven services then enrolled themselves and
+reached ready with zero restarts and no hand-written SQL.

@@ -1,0 +1,59 @@
+{
+  "services": [
+    {
+      "service_id": "00000000-0000-4000-8000-000000000001",
+      "kind": "service",
+      "display_name": "infernal-law (kernel)",
+      "communication_enabled": false
+    },
+    {
+      "service_id": "00000000-0000-4000-8000-000000000005",
+      "kind": "service",
+      "display_name": "infernal-inquisitor-simple (policy evaluator)",
+      "communication_enabled": false
+    },
+    {
+      "service_id": "00000000-0000-4000-8000-000000000002",
+      "kind": "service",
+      "display_name": "infernal-taskmaster-simple",
+      "namespace": "default",
+      "service_account": "infernal-taskmaster-simple",
+      "communication_enabled": true
+    },
+    {
+      "service_id": "00000000-0000-4000-8000-000000000003",
+      "kind": "worker",
+      "display_name": "infernal-worker-simple",
+      "namespace": "default",
+      "service_account": "infernal-worker-simple",
+      "communication_enabled": true
+    },
+    {
+      "service_id": "00000000-0000-4000-8000-000000000006",
+      "kind": "service",
+      "display_name": "infernal-librarian-simple",
+      "namespace": "default",
+      "service_account": "infernal-librarian-simple",
+      "communication_enabled": true,
+      "grants": [{ "action": "subscription.create", "scope": "*" }]
+    },
+    {
+      "service_id": "00000000-0000-4000-8000-000000000009",
+      "kind": "service",
+      "display_name": "infernal-pf2e-parser-simple",
+      "namespace": "default",
+      "service_account": "infernal-pf2e-parser-simple",
+      "communication_enabled": true,
+      "grants": [{ "action": "subscription.create", "scope": "*" }]
+    },
+    {
+      "service_id": "00000000-0000-4000-8000-000000000010",
+      "kind": "service",
+      "display_name": "infernal-pf2e-rules-simple",
+      "namespace": "default",
+      "service_account": "infernal-pf2e-rules-simple",
+      "communication_enabled": true,
+      "grants": [{ "action": "subscription.create", "scope": "*" }]
+    }
+  ]
+}
