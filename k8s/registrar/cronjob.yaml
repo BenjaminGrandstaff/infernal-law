@@ -19,12 +19,17 @@ metadata:
 spec:
   schedule: "*/15 * * * *"
   concurrencyPolicy: Forbid
-  successfulJobsHistoryLimit: 3
+  # A successful reconciliation is almost always "0 changed", and anything
+  # it did change is in the audit tables. Keep one for a sanity check.
+  # Failures are worth keeping: a failed run may have changed nothing, so
+  # the log is the only account of why.
+  successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 3
   startingDeadlineSeconds: 300
   jobTemplate:
     spec:
       backoffLimit: 2
+      ttlSecondsAfterFinished: 3600
       template:
         spec:
           restartPolicy: Never

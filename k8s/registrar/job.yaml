@@ -4,6 +4,13 @@ metadata:
   name: infernal-registrar
 spec:
   backoffLimit: 3
+  # Garbage-collect the Job and its Pod an hour after it finishes. Long
+  # enough to read the logs after a deploy, short enough that re-applying
+  # this Job on every deploy does not accumulate objects forever. Nothing is
+  # lost by the deletion: what the registrar changed is recorded in the
+  # kernel's own audit tables, with administrator, reason and correlation
+  # ID -- the Pod log is a convenience, not the record.
+  ttlSecondsAfterFinished: 3600
   template:
     spec:
       restartPolicy: Never
