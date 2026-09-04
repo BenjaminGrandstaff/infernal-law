@@ -519,11 +519,13 @@ fn dispatch(request: ParsedRequest, application: &Application) -> Response {
         if request.method != "POST" {
             return text_response("405 Method Not Allowed", "method not allowed\n");
         }
-        let challenge_request =
-            match parse_workload_challenge_request(request.content_type.as_deref(), &request.body) {
-                Ok(request) => request,
-                Err(response) => return response,
-            };
+        let challenge_request = match parse_workload_challenge_request(
+            request.content_type.as_deref(),
+            &request.body,
+        ) {
+            Ok(request) => request,
+            Err(response) => return response,
+        };
         let reviewer = match KubernetesTokenReviewer::from_env() {
             Ok(reviewer) => reviewer,
             Err(error) => {
@@ -1776,15 +1778,15 @@ where
     A: WorkloadChallengeIssuer,
 {
     match service.issue_challenge_for_workload(&request.workload_token, &request.pod_uid, now) {
-        Ok((service_id, challenge)) => match EnrollmentChallengeResponse::new(
-            service_id, challenge, now,
-        ) {
-            Ok(body) => json_response("201 Created", &body),
-            Err(_) => json_error(
-                "503 Service Unavailable",
-                EnrollmentErrorResponse::from_enrollment_error(&EnrollmentError::InvalidField),
-            ),
-        },
+        Ok((service_id, challenge)) => {
+            match EnrollmentChallengeResponse::new(service_id, challenge, now) {
+                Ok(body) => json_response("201 Created", &body),
+                Err(_) => json_error(
+                    "503 Service Unavailable",
+                    EnrollmentErrorResponse::from_enrollment_error(&EnrollmentError::InvalidField),
+                ),
+            }
+        }
         Err(error) => {
             let response = EnrollmentErrorResponse::from_enrollment_error(&error);
             let status = match response.code.as_str() {
