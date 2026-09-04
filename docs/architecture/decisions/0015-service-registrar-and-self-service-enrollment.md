@@ -165,6 +165,22 @@ Both halves are built.
 - Seeding the sentinel schema versions turned out to be a prerequisite
   (migration `0018`); without those rows every non-artifact governed action
   failed closed with `503`.
+- Withdrawing authority needed kernel support that did not exist. Grants were
+  strictly append-only, so a grant issued once could never be taken back.
+  Migration `0019` adds a single monotonic transition -- `revoked_at` NULL to
+  a timestamp -- and keeps rejecting everything else, including un-revoking
+  and DELETE. `revoke_authority_grant` is the audited procedure, and
+  `matching_grants` now excludes revoked rows.
+- Reconciliation prunes only when `REGISTRAR_PRUNE=true`. Withdrawing
+  authority is the one direction where a stale or mistaken manifest causes an
+  outage rather than an over-permission, so it is never the default and is
+  deliberately not enabled on the CronJob.
+- `k8s/registrar/cronjob.yaml` reconciles every 15 minutes, which is what
+  repairs a ServiceAccount that was deleted and recreated. `registrar/role.sql`
+  defines the registrar's own PostgreSQL role: it can write identities and
+  bindings, read grants, and execute the three SECURITY DEFINER procedures --
+  and cannot read `service_instances`, `authority_decisions`, or write
+  `authority_grants` at all.
 
 ## Validation
 
@@ -176,7 +192,13 @@ Both halves are built.
 - A workload presenting a token for any audience other than
   `infernal-law-enrollment` is refused at issuance.
 - Deleting and recreating a ServiceAccount is followed by successful enrollment
-  once the registrar has reconciled the new UID.
+  once the registrar has reconciled the new UID. Exercised: recreating
+  `infernal-pf2e-rules-simple`'s ServiceAccount broke enrollment into
+  CrashLoopBackOff, the CronJob reconciled the new UID, and the Pod recovered
+  on its own next restart with no human action.
+- A revoked grant stops authorizing immediately, its row survives as history,
+  and re-adding it to the manifest issues a fresh grant rather than resurrecting
+  the revoked one.
 - No manual `INSERT` is required to bring a cluster from empty to serving.
 
 All of the above were exercised on k3s on 2026-09-04. The kernel database was

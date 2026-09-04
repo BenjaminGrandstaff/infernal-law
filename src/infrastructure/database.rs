@@ -144,7 +144,9 @@ impl Database {
                 "\n",
                 include_str!("../../migrations/0017_work_claims.sql"),
                 "\n",
-                include_str!("../../migrations/0018_seed_no_artifact_schema_versions.sql")
+                include_str!("../../migrations/0018_seed_no_artifact_schema_versions.sql"),
+                "\n",
+                include_str!("../../migrations/0019_revoke_authority_grants.sql")
             ))
             .map_err(DatabaseError::Query)
     }

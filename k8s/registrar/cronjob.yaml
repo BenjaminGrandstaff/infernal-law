@@ -1,0 +1,62 @@
+# Periodic reconciliation. The one-shot Job in job.yaml covers deploys; this
+# covers drift that happens with no deploy at all -- most importantly a
+# ServiceAccount deleted and recreated, which changes its UID and silently
+# breaks enrollment for that service while every manifest still looks right.
+#
+# A CronJob rather than a watch-based controller: reconciliation is cheap and
+# idempotent, the failure it repairs is rare, and a Job that exits leaves far
+# less to reason about than a long-lived process holding a database
+# connection and an API watch. The cost is latency -- drift persists up to
+# one interval.
+#
+# Pruning is deliberately NOT enabled here. Withdrawing authority on a timer,
+# from whatever manifest happens to be in the ConfigMap, is how an unrelated
+# mistake becomes an outage at 3am. Run prune deliberately, from the Job.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: infernal-registrar
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: infernal-registrar
+          containers:
+            - name: registrar
+              image: localhost/infernal-law:latest
+              imagePullPolicy: IfNotPresent
+              command: ["/usr/local/bin/infernal-registrar"]
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: infernal-registrar-database
+                      key: url
+                - name: REGISTRAR_MANIFEST
+                  value: /etc/infernal-registrar/services.json
+                - name: REGISTRAR_ADMINISTRATOR
+                  value: registrar-cronjob
+              volumeMounts:
+                - name: manifest
+                  mountPath: /etc/infernal-registrar
+                  readOnly: true
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests: { cpu: 10m, memory: 16Mi }
+                limits: { cpu: 250m, memory: 64Mi }
+          volumes:
+            - name: manifest
+              configMap:
+                name: infernal-registrar-manifest

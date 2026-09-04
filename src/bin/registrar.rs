@@ -34,6 +34,12 @@ const ADMINISTRATOR_ENV: &str = "REGISTRAR_ADMINISTRATOR";
 const API_URL_ENV: &str = "KUBERNETES_API_URL";
 const TOKEN_PATH_ENV: &str = "REGISTRAR_TOKEN_PATH";
 const CA_PATH_ENV: &str = "KUBERNETES_CA_PATH";
+/// Opt-in. Reconciliation is additive by default: removing a service from
+/// the manifest does nothing unless this is set. Withdrawing authority is
+/// the one direction where a mistake in the manifest -- or running an old
+/// copy of it -- causes an outage rather than an over-permission, so it is
+/// never the default.
+const PRUNE_ENV: &str = "REGISTRAR_PRUNE";
 
 const DEFAULT_API_URL: &str = "https://kubernetes.default.svc";
 const DEFAULT_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
@@ -271,6 +277,7 @@ fn reconcile(
                      WHERE source_service_id = $1::text::uuid \
                        AND action = $2 AND scope = $3 \
                        AND destination_service_id IS NULL \
+                       AND revoked_at IS NULL \
                        AND (valid_until IS NULL \
                             OR valid_until > extract(epoch from now())::bigint)",
                     &[&service.service_id, &grant.action, &grant.scope],
@@ -306,6 +313,81 @@ fn reconcile(
     Ok(changes)
 }
 
+/// Withdraws authority the manifest no longer asks for: enrollment bindings
+/// for services it does not mention, and grants it does not list. Disabling
+/// a binding stops new instances enrolling but leaves already-enrolled ones
+/// running until their lease expires; revoking a grant takes effect on the
+/// next authority decision.
+fn prune(
+    database: &mut PostgresClient,
+    manifest: &Manifest,
+    administrator: &str,
+) -> Result<Vec<String>, RegistrarError> {
+    let managed: Vec<String> = manifest
+        .services
+        .iter()
+        .map(|service| service.service_id.clone())
+        .collect();
+    let mut removed = Vec::new();
+
+    let rows = database
+        .query(
+            "UPDATE service_enrollment_bindings SET enabled = false, \
+                    updated_at = transaction_timestamp() \
+             WHERE enabled AND NOT (service_id::text = ANY($1)) \
+             RETURNING service_id::text, service_account",
+            &[&managed],
+        )
+        .map_err(|error| RegistrarError::Database(error.to_string()))?;
+    for row in &rows {
+        let account: String = row.get(1);
+        removed.push(format!("binding disabled: {account}"));
+    }
+
+    let mut wanted: Vec<(String, String, String)> = Vec::new();
+    for service in &manifest.services {
+        for grant in &service.grants {
+            wanted.push((
+                service.service_id.clone(),
+                grant.action.clone(),
+                grant.scope.clone(),
+            ));
+        }
+    }
+    let live = database
+        .query(
+            "SELECT grant_id::text, source_service_id::text, action, scope \
+             FROM authority_grants WHERE revoked_at IS NULL",
+            &[],
+        )
+        .map_err(|error| RegistrarError::Database(error.to_string()))?;
+    for row in &live {
+        let grant_id: String = row.get(0);
+        let source: String = row.get(1);
+        let action: String = row.get(2);
+        let scope: String = row.get(3);
+        if wanted
+            .iter()
+            .any(|(id, a, s)| id == &source && a == &action && s == &scope)
+        {
+            continue;
+        }
+        database
+            .execute(
+                "SELECT revoke_authority_grant($1::text::uuid, $2, $3, gen_random_uuid(), \
+                        extract(epoch from now())::bigint)",
+                &[
+                    &grant_id,
+                    &administrator,
+                    &"registrar prune: not present in manifest",
+                ],
+            )
+            .map_err(|error| RegistrarError::Database(error.to_string()))?;
+        removed.push(format!("grant revoked: {action} {scope} for {source}"));
+    }
+    Ok(removed)
+}
+
 fn run() -> Result<(), RegistrarError> {
     let database_url = env::var(DATABASE_URL_ENV)
         .map_err(|_| RegistrarError::Configuration(format!("{DATABASE_URL_ENV} is not set")))?;
@@ -323,6 +405,7 @@ fn run() -> Result<(), RegistrarError> {
         .map_err(|error| RegistrarError::Database(error.to_string()))?;
     let resolver = KubernetesResolver::from_env()?;
 
+    let prune_enabled = env::var(PRUNE_ENV).is_ok_and(|value| value == "true");
     let changes = reconcile(&mut database, &resolver, &manifest, &administrator)?;
     let mut changed = 0usize;
     for (service, applied) in &changes {
@@ -333,7 +416,25 @@ fn run() -> Result<(), RegistrarError> {
             println!("{service}: {}", applied.join(", "));
         }
     }
-    println!("reconciled {} service(s), {changed} changed", changes.len());
+    if prune_enabled {
+        let removed = prune(&mut database, &manifest, &administrator)?;
+        if removed.is_empty() {
+            println!("prune: nothing to withdraw");
+        }
+        for entry in &removed {
+            println!("prune: {entry}");
+        }
+        println!(
+            "reconciled {} service(s), {changed} changed, {} withdrawn",
+            changes.len(),
+            removed.len()
+        );
+    } else {
+        println!(
+            "reconciled {} service(s), {changed} changed (prune disabled; set {PRUNE_ENV}=true to withdraw what the manifest omits)",
+            changes.len()
+        );
+    }
     Ok(())
 }
 

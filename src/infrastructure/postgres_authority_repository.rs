@@ -31,7 +31,8 @@ const MATCHING_GRANTS_SQL: &str = "SELECT grant_id::text, source_service_id::tex
       AND destination_service_id IS NOT DISTINCT FROM $5::text::uuid \
       AND (scope = '*' OR scope = $6) \
       AND valid_from <= $7 \
-      AND (valid_until IS NULL OR valid_until > $7)";
+      AND (valid_until IS NULL OR valid_until > $7) \
+      AND revoked_at IS NULL";
 
 const PUBLISH_SCHEMA_VERSION_SQL: &str = "SELECT schema_version_id::text, kind, name, version, \
         owner_service_id::text, content_digest, predecessor_id::text, published_at, status \
@@ -274,4 +275,26 @@ fn schema_status_from_sql(value: &str) -> Result<SchemaStatus, AuthorityError> {
 
 fn repository_error(error: impl std::fmt::Display) -> AuthorityError {
     AuthorityError::Repository(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MATCHING_GRANTS_SQL;
+
+    /// A revoked grant must never authorize anything. This predicate is the
+    /// only thing standing between a withdrawn grant and a live `allow`, so
+    /// it is asserted here rather than left to be noticed in production.
+    #[test]
+    fn revoked_grants_are_excluded_from_matching() {
+        assert!(
+            MATCHING_GRANTS_SQL.contains("revoked_at IS NULL"),
+            "matching_grants must exclude revoked grants"
+        );
+    }
+
+    #[test]
+    fn matching_still_honours_the_validity_window() {
+        assert!(MATCHING_GRANTS_SQL.contains("valid_from <= $7"));
+        assert!(MATCHING_GRANTS_SQL.contains("valid_until IS NULL OR valid_until > $7"));
+    }
 }
