@@ -309,6 +309,48 @@ where
         Ok(challenge)
     }
 
+    /// Issues a challenge to a workload that authenticates itself, rather
+    /// than to an operator naming a service. The workload proves which
+    /// service it may become exactly the way `authenticate_and_register`
+    /// does -- a projected ServiceAccount token for `ENROLLMENT_AUDIENCE`,
+    /// bound to the claimed Pod UID, resolved through an enabled enrollment
+    /// binding -- so issuance stays fail-closed: an unbound workload gets no
+    /// challenge. The caller never names its own service ID; it is derived
+    /// from the binding, so a workload cannot request a challenge for an
+    /// identity it was not authorized to become.
+    pub fn issue_challenge_for_workload(
+        &self,
+        workload_token: &str,
+        claimed_pod_uid: &str,
+        now: i64,
+    ) -> Result<(ActorId, EnrollmentChallenge), EnrollmentError> {
+        let claimed_pod_uid = validate_field(claimed_pod_uid, MAX_UID_LENGTH)?;
+        let workload = self.reviewer.review(workload_token, ENROLLMENT_AUDIENCE)?;
+        if !workload
+            .audiences
+            .iter()
+            .any(|value| value == ENROLLMENT_AUDIENCE)
+        {
+            return Err(EnrollmentError::AudienceMismatch);
+        }
+        if workload.pod_uid != claimed_pod_uid {
+            return Err(EnrollmentError::PodMismatch);
+        }
+        let binding = self
+            .bindings
+            .find_workload(
+                &workload.namespace,
+                &workload.service_account,
+                &workload.service_account_uid,
+            )?
+            .ok_or(EnrollmentError::BindingNotFound)?;
+        if !binding.enabled {
+            return Err(EnrollmentError::BindingDisabled);
+        }
+        let challenge = self.issue_challenge(binding.service_id, now)?;
+        Ok((binding.service_id, challenge))
+    }
+
     pub fn authenticate_and_register(
         &self,
         request: EnrollmentRequest,

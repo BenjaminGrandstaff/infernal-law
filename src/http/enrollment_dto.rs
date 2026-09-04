@@ -33,6 +33,30 @@ impl EnrollmentChallengeRequest {
     }
 }
 
+/// A challenge request made by the workload itself rather than by an
+/// operator naming a service. The service ID is deliberately absent: it is
+/// derived from the enrollment binding the token resolves to, so a workload
+/// cannot ask for a challenge belonging to an identity it may not become.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkloadChallengeRequest {
+    pub pod_uid: String,
+    pub workload_token: String,
+}
+
+/// Debug is written by hand, not derived: this type carries a bearer token,
+/// and the derived form would print it into any log line that formats a
+/// request.
+impl fmt::Debug for WorkloadChallengeRequest {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkloadChallengeRequest")
+            .field("pod_uid", &self.pod_uid)
+            .field("workload_token", &"<redacted>")
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnrollmentChallengeResponse {

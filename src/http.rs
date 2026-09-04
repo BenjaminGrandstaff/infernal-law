@@ -19,8 +19,8 @@ use crate::kernel::authority::{
     no_artifact_schema_versions,
 };
 use crate::kernel::enrollment::{
-    EnrollmentBindingRepository, EnrollmentError, EnrollmentRequest, EnrollmentService,
-    WorkloadTokenReviewer,
+    EnrollmentBindingRepository, EnrollmentChallenge, EnrollmentError, EnrollmentRequest,
+    EnrollmentService, WorkloadTokenReviewer,
 };
 use crate::kernel::identity::ActorId;
 use crate::kernel::instance_keys::{InstanceId, InstancePublicKey};
@@ -46,7 +46,8 @@ use crate::kernel::{admission::AdmissionError, replay_protection::ReplayProtecti
 use crate::wiring::Application;
 
 use self::enrollment_dto::{
-    EnrollmentErrorResponse, EnrollmentSubmissionRequest, EnrollmentSuccessResponse,
+    EnrollmentChallengeResponse, EnrollmentErrorResponse, EnrollmentSubmissionRequest,
+    EnrollmentSuccessResponse, WorkloadChallengeRequest,
 };
 use self::instance_renewal_dto::InstanceRenewalRequest;
 use self::request_dto::{AcceptedRequestResponse, SubmitRequestRequest};
@@ -168,6 +169,31 @@ pub trait EnrollmentAuthenticator {
         request: EnrollmentRequest,
         now: i64,
     ) -> Result<RegisteredInstance, EnrollmentError>;
+}
+
+pub trait WorkloadChallengeIssuer {
+    fn issue_challenge_for_workload(
+        &self,
+        workload_token: &str,
+        claimed_pod_uid: &str,
+        now: i64,
+    ) -> Result<(ActorId, EnrollmentChallenge), EnrollmentError>;
+}
+
+impl<A, B, R> WorkloadChallengeIssuer for EnrollmentService<A, B, R>
+where
+    A: WorkloadTokenReviewer,
+    B: EnrollmentBindingRepository,
+    R: InstanceRegistryRepository,
+{
+    fn issue_challenge_for_workload(
+        &self,
+        workload_token: &str,
+        claimed_pod_uid: &str,
+        now: i64,
+    ) -> Result<(ActorId, EnrollmentChallenge), EnrollmentError> {
+        EnrollmentService::issue_challenge_for_workload(self, workload_token, claimed_pod_uid, now)
+    }
 }
 
 impl<A, B, R> EnrollmentAuthenticator for EnrollmentService<A, B, R>
@@ -489,6 +515,28 @@ impl MalformedRequestResponse {
 }
 
 fn dispatch(request: ParsedRequest, application: &Application) -> Response {
+    if request.path == "/v1/enrollments/challenges" {
+        if request.method != "POST" {
+            return text_response("405 Method Not Allowed", "method not allowed\n");
+        }
+        let challenge_request =
+            match parse_workload_challenge_request(request.content_type.as_deref(), &request.body) {
+                Ok(request) => request,
+                Err(response) => return response,
+            };
+        let reviewer = match KubernetesTokenReviewer::from_env() {
+            Ok(reviewer) => reviewer,
+            Err(error) => {
+                return json_error(
+                    "503 Service Unavailable",
+                    EnrollmentErrorResponse::from_enrollment_error(&error),
+                );
+            }
+        };
+        let service = application.enrollment_service(reviewer);
+        return issue_workload_challenge(&challenge_request, &service, unix_time());
+    }
+
     if request.path == "/v1/enrollments" {
         if request.method != "POST" {
             return text_response("405 Method Not Allowed", "method not allowed\n");
@@ -1687,6 +1735,66 @@ fn parse_enrollment_request(
             EnrollmentErrorResponse::malformed_request(),
         )
     })
+}
+
+fn parse_workload_challenge_request(
+    content_type: Option<&str>,
+    body: &[u8],
+) -> Result<WorkloadChallengeRequest, Response> {
+    if body.len() > MAX_ENROLLMENT_BODY_BYTES {
+        return Err(json_error(
+            "413 Payload Too Large",
+            EnrollmentErrorResponse::malformed_request(),
+        ));
+    }
+    if !content_type.is_some_and(is_json_content_type) {
+        return Err(json_error(
+            "415 Unsupported Media Type",
+            EnrollmentErrorResponse::malformed_request(),
+        ));
+    }
+    serde_json::from_slice::<WorkloadChallengeRequest>(body).map_err(|_| {
+        json_error(
+            "400 Bad Request",
+            EnrollmentErrorResponse::malformed_request(),
+        )
+    })
+}
+
+/// Issues a challenge to a workload that authenticated itself. Every
+/// rejection collapses to the same `enrollment_rejected` body the
+/// submission route already returns, so a caller cannot distinguish "no
+/// binding exists" from "the binding is disabled" from "your token was
+/// refused" and use this route to enumerate which ServiceAccounts are
+/// bound.
+fn issue_workload_challenge<A>(
+    request: &WorkloadChallengeRequest,
+    service: &A,
+    now: i64,
+) -> Response
+where
+    A: WorkloadChallengeIssuer,
+{
+    match service.issue_challenge_for_workload(&request.workload_token, &request.pod_uid, now) {
+        Ok((service_id, challenge)) => match EnrollmentChallengeResponse::new(
+            service_id, challenge, now,
+        ) {
+            Ok(body) => json_response("201 Created", &body),
+            Err(_) => json_error(
+                "503 Service Unavailable",
+                EnrollmentErrorResponse::from_enrollment_error(&EnrollmentError::InvalidField),
+            ),
+        },
+        Err(error) => {
+            let response = EnrollmentErrorResponse::from_enrollment_error(&error);
+            let status = match response.code.as_str() {
+                "enrollment_rejected" => "401 Unauthorized",
+                "invalid_enrollment_request" => "400 Bad Request",
+                _ => "503 Service Unavailable",
+            };
+            json_error(status, response)
+        }
+    }
 }
 
 fn authenticate_enrollment<A>(request: EnrollmentRequest, authenticator: &A, now: i64) -> Response

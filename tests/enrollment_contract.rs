@@ -358,3 +358,98 @@ fn challenge_can_be_consumed_only_once() {
         Err(EnrollmentError::ChallengeRejected)
     );
 }
+
+#[test]
+fn bound_workload_can_obtain_its_own_challenge_without_naming_a_service() {
+    let service_id = ActorId::new();
+    let enrollment = service(
+        service_id,
+        FakeReviewer {
+            workload: workload(vec![ENROLLMENT_AUDIENCE.to_owned()], "pod-uid"),
+        },
+        true,
+    );
+
+    let (issued_for, _challenge) = enrollment
+        .issue_challenge_for_workload("bound-token", "pod-uid", 1_000)
+        .unwrap();
+
+    // The service ID comes from the binding, never from the caller.
+    assert_eq!(issued_for, service_id);
+}
+
+#[test]
+fn a_self_issued_challenge_completes_a_full_enrollment() {
+    let service_id = ActorId::new();
+    let credential = InstanceCredential::generate(service_id);
+    let enrollment = service(
+        service_id,
+        FakeReviewer {
+            workload: workload(vec![ENROLLMENT_AUDIENCE.to_owned()], "pod-uid"),
+        },
+        true,
+    );
+
+    let (_, challenge) = enrollment
+        .issue_challenge_for_workload("bound-token", "pod-uid", 990)
+        .unwrap();
+    let registered = enrollment
+        .authenticate_and_register(
+            request(&credential, challenge, "bound-token", "pod-uid"),
+            1_000,
+        )
+        .unwrap();
+
+    assert_eq!(registered.public_key(), credential.public_key());
+}
+
+#[test]
+fn challenge_issuance_fails_closed_for_a_disabled_binding() {
+    let service_id = ActorId::new();
+    let enrollment = service(
+        service_id,
+        FakeReviewer {
+            workload: workload(vec![ENROLLMENT_AUDIENCE.to_owned()], "pod-uid"),
+        },
+        false,
+    );
+
+    assert_eq!(
+        enrollment.issue_challenge_for_workload("bound-token", "pod-uid", 1_000),
+        Err(EnrollmentError::BindingDisabled)
+    );
+}
+
+#[test]
+fn challenge_issuance_rejects_a_token_for_another_audience() {
+    let service_id = ActorId::new();
+    let enrollment = service(
+        service_id,
+        FakeReviewer {
+            workload: workload(vec!["some-other-audience".to_owned()], "pod-uid"),
+        },
+        true,
+    );
+
+    assert_eq!(
+        enrollment.issue_challenge_for_workload("bound-token", "pod-uid", 1_000),
+        Err(EnrollmentError::AudienceMismatch)
+    );
+}
+
+#[test]
+fn challenge_issuance_rejects_a_mismatched_pod_uid() {
+    let service_id = ActorId::new();
+    let enrollment = service(
+        service_id,
+        FakeReviewer {
+            workload: workload(vec![ENROLLMENT_AUDIENCE.to_owned()], "real-pod-uid"),
+        },
+        true,
+    );
+
+    assert_eq!(
+        enrollment.issue_challenge_for_workload("bound-token", "claimed-other-pod", 1_000),
+        Err(EnrollmentError::PodMismatch)
+    );
+}
