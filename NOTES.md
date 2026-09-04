@@ -46,12 +46,17 @@ of that property already exists here and is worth keeping deliberately:
 - **Missing prerequisites fail closed.** `require_vector_extension()` aborts
   startup with `VectorExtensionMissing` rather than serving a half-working
   kernel.
+- **Applied migrations are recorded.** `kernel_schema_migrations` (created in
+  `0001_identities.sql`) holds a `version`/`name`/`applied_at` row per migration,
+  and each file self-registers with `INSERT ... ON CONFLICT (version) DO
+  NOTHING`. A fresh boot lands all 17.
 
-Because there is **no schema-version tracking table**, that idempotency is
-load-bearing rather than incidental: the entire batch replays at every start.
-Any future migration that is not written to be re-runnable will break startup on
-an existing database, not just on a fresh one. This constraint should be stated
-wherever migrations are added.
+Note what that table does *not* do: `migrate()` never reads it. It is an
+inventory of what has been applied, not a gate on what to apply — the entire
+batch replays at every start regardless. Idempotency is therefore load-bearing
+rather than incidental, and any future migration not written to be re-runnable
+will break startup on an existing database, not just on a fresh one. This
+constraint should be stated wherever migrations are added.
 
 ## Blocker: move and stabilize the install first
 
@@ -86,3 +91,27 @@ adding a file to `migrations/` does nothing until its `include_str!` line is
 added too. On-disk and wired-in counts currently agree at 17, but they can drift
 silently, and the failure mode is a missing table at runtime rather than a build
 error.
+
+## Verified reconstruction (2026-09-04)
+
+The stack was rebuilt from these repositories on a clean Fedora 44 host. What
+was actually needed:
+
+- **Rust 1.98.0** (Fedora packaged) — satisfies `rust-version = "1.85"` and
+  edition 2024. `cargo build` succeeded with no additional system libraries;
+  `reqwest` uses `rustls-tls`, so there is no OpenSSL dev dependency.
+- **PostgreSQL 18.6** plus the **`pgvector` 0.8.0** package. `CREATE EXTENSION
+  vector` must be run once per database — installing the RPM alone is not
+  enough, and `require_vector_extension()` will refuse to start without it.
+- **`pg_hba.conf` needs editing.** Fedora's default is `ident` for
+  `127.0.0.1/32`, which a `postgres://user:pass@127.0.0.1` URL cannot satisfy.
+  Change the two `host all all` lines to `scram-sha-256` and reload.
+- One role and one database per service, owned by that role.
+
+With that in place `./target/debug/infernal-law` came up in about a second,
+applied all 17 migrations itself into an empty database (26 tables), and served
+`/`, `/health/live`, `/health/ready` and `/v1/kernel-identity` with `200`.
+
+This confirms the schema half of the install is genuinely self-healing against
+an empty database. The identity/grant provisioning described above is not — the
+governed routes still require out-of-band setup before they do anything.
